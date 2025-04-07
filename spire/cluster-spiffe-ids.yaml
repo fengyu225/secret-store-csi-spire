@@ -1,0 +1,22 @@
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: oidc-provider-spiffeid
+spec:
+  spiffeIDTemplate: "spiffe://example.org/oidc-provider"
+  podSelector:
+    matchLabels:
+      app: spire-server
+  workloadSelectorTemplates:
+    - "k8s:ns:oidc-provider"
+    - "k8s:sa:oidc-provider"
+---
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: default
+spec:
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/ns/{{ .PodMeta.Namespace }}/sa/{{ .PodSpec.ServiceAccountName }}"
+  podSelector:
+    matchLabels:
+      spiffe.io/spire-managed-identity: "true"

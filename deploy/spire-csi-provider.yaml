@@ -1,0 +1,132 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: csi
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: app
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spire-csi-provider
+  namespace: csi
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: test-workload-sa
+  namespace: app
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  labels:
+    app.kubernetes.io/name: spire-csi-provider
+  name: spire-csi-provider
+  namespace: csi
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: spire-csi-provider
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: spire-csi-provider
+        spiffe.io/spire-managed-identity: "true"
+    spec:
+      serviceAccountName: spire-csi-provider
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: provider
+          image: fengyu225/secrets-store-csi-provider-spire:v0.0.1
+          imagePullPolicy: Always
+          args:
+            - -endpoint=/provider/spire.sock
+            - -socketPath=/run/spire/admin-socket/socket
+            - -logLevel=debug
+          resources:
+            requests:
+              cpu: 50m
+              memory: 100Mi
+            limits:
+              cpu: 50m
+              memory: 100Mi
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: providervol
+              mountPath: "/provider"
+            - name: spire-agent-socket
+              mountPath: "/run/spire/agent-sockets"
+              readOnly: true
+            - name: spire-admin-socket
+              mountPath: "/run/spire/admin-socket"
+              readOnly: true
+      volumes:
+        - name: providervol
+          hostPath:
+            path: "/etc/kubernetes/secrets-store-csi-providers"
+        - name: spire-agent-socket
+          hostPath:
+            path: "/run/spire/agent-sockets"
+            type: Directory
+        - name: spire-admin-socket
+          hostPath:
+            path: "/run/spire/admin-socket"
+            type: Directory
+---
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: spire
+  namespace: app
+spec:
+  provider: spire
+  parameters:
+    useCase: "mesh"
+    trustDomain: "example.org"
+    objects: |
+      - objectName: "x509"
+        type: "x509-svid"
+        filePermission: 0640
+        paths: 
+          - "x509/cert.pem"
+          - "x509/key.pem"
+          - "x509/bundle.pem"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-workload
+  namespace: app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test-workload
+  template:
+    metadata:
+      labels:
+        app: test-workload
+        spiffe.io/spire-managed-identity: "true"
+    spec:
+      serviceAccountName: test-workload-sa
+      containers:
+        - name: alpine
+          image: alpine:3.19
+          command: ["sh", "-c", "sleep 1000000"]
+          volumeMounts:
+            - name: spire-svids
+              mountPath: "/run/spire"
+              readOnly: true
+      volumes:
+        - name: spire-svids
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: "spire"

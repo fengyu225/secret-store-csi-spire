@@ -1,0 +1,32 @@
+version: '3.8'
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: spire-db
+    environment:
+      - POSTGRES_DB=spire-db
+      - POSTGRES_USER=spire
+      - POSTGRES_PASSWORD=password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U spire -d spire-db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - db-network
+      - kind
+
+networks:
+  db-network:
+    name: db-network
+  kind:
+    external: true
+    name: "kind"
+
+volumes:
+  postgres_data:

@@ -1,0 +1,79 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spire-server
+  namespace: spire
+data:
+  server.conf: |
+    server {
+      bind_address = "0.0.0.0"
+      bind_port = "8081"
+      trust_domain = "example.org"
+      data_dir = "/run/spire/server/data"
+      log_level = "DEBUG"
+      default_x509_svid_ttl = "24h"
+      ca_ttl = "48h"
+      ca_subject = {
+        country = ["US"]
+        organization = ["Example Organization"]
+        common_name = "example.org"
+      }
+      ca_key_type = "rsa-2048"
+      jwt_issuer = "http://localhost:8080"
+      federation {
+        bundle_endpoint {
+          address = "0.0.0.0"
+          port = 8443
+        }
+      }
+    }
+
+    plugins {
+      DataStore "sql" {
+        plugin_data {
+          database_type = "postgres"
+          connection_string = "postgresql://spire:password@postgres/spire-db?sslmode=disable"
+        }
+      }    
+
+      NodeAttestor "k8s_psat" {
+        plugin_data {
+          clusters = {
+            "spire-demo" = {
+              service_account_allow_list = ["spire:spire-agent", "spire:oidc-provider"]
+            }
+          }
+        }
+      }
+
+      UpstreamAuthority "vault" {
+        plugin_data {
+          vault_addr = "https://vault:8200"
+          insecure_skip_verify = true
+          pki_mount_point = "pki_root"
+          ca_cert_path = "/run/spire/vault-certs/ca.crt"
+          cert_auth {
+            cert_auth_mount_point = "cert"
+            client_cert_path = "/run/spire/vault-certs/client.crt"
+            client_key_path = "/run/spire/vault-certs/client.key"
+          }
+        }
+      }    
+    
+      KeyManager "memory" {
+      }
+   
+      Notifier "k8sbundle" {
+        plugin_data {
+          namespace = "spire"
+        }
+      }
+    }
+
+    health_checks {
+      listener_enabled = true
+      bind_address = "0.0.0.0"
+      bind_port = "8080"
+      live_path = "/live"
+      ready_path = "/ready"
+    }
