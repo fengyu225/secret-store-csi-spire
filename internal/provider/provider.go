@@ -62,11 +62,13 @@ func (p *Provider) HandleMountRequest(ctx context.Context, cfg config.Config, fl
 		spiffeID := p.buildSpiffeIDFromSelectors(cfg.Parameters)
 
 		// TODO: wait for SVID being fetched
-		time.Sleep(10 * time.Second)
+		time.Sleep(5 * time.Second)
 
 		switch object.Type {
 		case "x509-svid":
 			contents, err = p.fetchX509SVID(ctx, spireClient, object, spiffeID)
+		case "jwt-svid":
+			contents, err = p.fetchJWTSVID(ctx, spireClient, object, spiffeID)
 		default:
 			return nil, fmt.Errorf("unsupported object type: %s", object.Type)
 		}
@@ -204,6 +206,26 @@ func (p *Provider) fetchX509SVID(ctx context.Context, spireClient *client.Client
 	}
 
 	result[bundlePath] = []byte(bundlePEM.String())
+
+	return result, nil
+}
+
+func (p *Provider) fetchJWTSVID(ctx context.Context, spireClient *client.Client, object config.Object, spiffeID string) (map[string][]byte, error) {
+	if len(object.Audience) == 0 {
+		return nil, fmt.Errorf("no audience specified for JWT SVID")
+	}
+
+	if len(object.Paths) != 1 {
+		return nil, fmt.Errorf("expected 1 path for JWT SVID but got %d", len(object.Paths))
+	}
+
+	token, err := spireClient.FetchJWTSVID(ctx, spiffeID, object.Audience)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch JWT SVID: %w", err)
+	}
+
+	result := make(map[string][]byte)
+	result[object.Paths[0]] = []byte(token)
 
 	return result, nil
 }

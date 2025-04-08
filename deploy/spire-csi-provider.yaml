@@ -93,10 +93,17 @@ spec:
       - objectName: "x509"
         type: "x509-svid"
         filePermission: 0640
-        paths: 
+        paths:
           - "x509/cert.pem"
           - "x509/key.pem"
           - "x509/bundle.pem"
+      - objectName: "app1-jwt"
+        type: "jwt-svid"
+        filePermission: 0640
+        audience:
+          - "app1"
+        paths:
+          - "jwt/app1.token"
 ---
 apiVersion: apps/v1
 kind: Deployment

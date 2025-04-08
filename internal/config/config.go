@@ -50,7 +50,7 @@ type RotationConfig struct {
 type Object struct {
 	ObjectName     string      `yaml:"objectName,omitempty"`
 	Type           string      `yaml:"type,omitempty"`
-	Audience       string      `yaml:"audience,omitempty"`
+	Audience       []string    `yaml:"audience,omitempty"`
 	FilePermission os.FileMode `yaml:"filePermission,omitempty"`
 	Paths          []string    `yaml:"paths,omitempty"`
 }
@@ -153,7 +153,7 @@ func (c *Config) validate() error {
 			return fmt.Errorf("invalid type %q for object %q", object.Type, object.ObjectName)
 		}
 
-		if object.Type == "jwt-svid" && object.Audience == "" {
+		if object.Type == "jwt-svid" && len(object.Audience) == 0 {
 			return fmt.Errorf("audience is required for JWT SVID object %q", object.ObjectName)
 		}
 

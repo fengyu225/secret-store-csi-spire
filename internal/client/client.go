@@ -34,6 +34,8 @@ type Client struct {
 	config Config
 	logger hclog.Logger
 
+	delegatedIdentityClient delegatedapi.DelegatedIdentityClient
+
 	connectionAttempts int
 
 	stream      delegatedapi.DelegatedIdentity_SubscribeToX509SVIDsClient
@@ -121,6 +123,28 @@ func (c *Client) GetCACertificates(ctx context.Context) ([]*x509.Certificate, er
 	return allCerts, nil
 }
 
+func (c *Client) FetchJWTSVID(ctx context.Context, spiffeID string, audiences []string) (string, error) {
+	if c.delegatedIdentityClient == nil {
+		return "", errors.New("not connected to SPIRE Delegated Identity API")
+	}
+
+	c.logger.Debug("Fetching JWT-SVID", "spiffeID", spiffeID, "audiences", audiences)
+
+	resp, err := c.delegatedIdentityClient.FetchJWTSVIDs(ctx, &delegatedapi.FetchJWTSVIDsRequest{
+		Selectors: c.config.Selectors,
+		Audience:  audiences,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch JWT-SVID: %w", err)
+	}
+
+	if len(resp.Svids) == 0 {
+		return "", errors.New("no JWT-SVIDs returned")
+	}
+
+	return resp.Svids[0].Token, nil
+}
+
 func (c *Client) listenForUpdates(ctx context.Context) {
 	c.openStream(ctx)
 
@@ -201,6 +225,7 @@ func (c *Client) initWatcher(ctx context.Context) (delegatedapi.DelegatedIdentit
 	}
 
 	client := delegatedapi.NewDelegatedIdentityClient(conn)
+	c.delegatedIdentityClient = client
 
 	c.logger.Debug("SPIRE Delegated Identity client successfully initialized")
 
