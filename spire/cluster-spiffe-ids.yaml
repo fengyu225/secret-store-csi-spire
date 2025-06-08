@@ -20,3 +20,5 @@ spec:
   podSelector:
     matchLabels:
       spiffe.io/spire-managed-identity: "true"
+ttl: 1m
+jwtTtl: 1m
