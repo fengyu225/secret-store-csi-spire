@@ -25,6 +25,7 @@ type FlagsConfig struct {
 	HMACSecretName  string
 	CacheSize       int
 	SpireSocketPath string
+	MetricsAddr     string
 }
 
 type Parameters struct {

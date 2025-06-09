@@ -4,21 +4,11 @@ metadata:
   name: csi
 ---
 apiVersion: v1
-kind: Namespace
-metadata:
-  name: app
----
-apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: spire-csi-provider
   namespace: csi
 ---
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: test-workload-sa
-  namespace: app
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -48,6 +38,44 @@ spec:
             - -endpoint=/provider/spire.sock
             - -socketPath=/run/spire/admin-socket/socket
             - -logLevel=debug
+            - -healthAddr=:8080
+            - -metricsAddr=:8081
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: health
+              containerPort: 8080
+              protocol: TCP
+            - name: metrics
+              containerPort: 8081
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
           resources:
             requests:
               cpu: 50m
@@ -104,36 +132,3 @@ spec:
           - "app1"
         paths:
           - "jwt/app1.token"
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: test-workload
-  namespace: app
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: test-workload
-  template:
-    metadata:
-      labels:
-        app: test-workload
-        spiffe.io/spire-managed-identity: "true"
-    spec:
-      serviceAccountName: test-workload-sa
-      containers:
-        - name: alpine
-          image: alpine:3.19
-          command: ["sh", "-c", "sleep 1000000"]
-          volumeMounts:
-            - name: spire-svids
-              mountPath: "/run/spire"
-              readOnly: true
-      volumes:
-        - name: spire-svids
-          csi:
-            driver: secrets-store.csi.k8s.io
-            readOnly: true
-            volumeAttributes:
-              secretProviderClass: "spire"
