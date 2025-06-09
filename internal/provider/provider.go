@@ -61,8 +61,13 @@ func (p *Provider) HandleMountRequest(ctx context.Context, cfg config.Config, fl
 
 		spiffeID := p.buildSpiffeIDFromSelectors(cfg.Parameters)
 
-		// TODO: wait for SVID being fetched
-		time.Sleep(5 * time.Second)
+		if err := spireClient.WaitForSVID(ctx, spiffeID, 30*time.Second); err != nil {
+			return nil, fmt.Errorf("failed waiting for SVID: %w", err)
+		}
+
+		if err := spireClient.WaitForTrustBundle(ctx, 30*time.Second); err != nil {
+			return nil, fmt.Errorf("failed waiting for trust bundle: %w", err)
+		}
 
 		switch object.Type {
 		case "x509-svid":

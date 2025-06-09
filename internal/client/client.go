@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,6 +18,11 @@ import (
 	typesapi "github.com/spiffe/spire-api-sdk/proto/spire/api/types"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+)
+
+const (
+	// Start refreshing JWT SVIDs 1 hour before expiration
+	jwtRefreshBuffer = 1 * time.Hour
 )
 
 type CertificateRotationEvent struct {
@@ -28,6 +35,12 @@ type Config struct {
 	SpiffeTrustDomain string
 	Selectors         []*typesapi.Selector
 	RotatedQueueSize  int
+}
+
+type jwtCacheEntry struct {
+	token     string
+	expiresAt time.Time
+	audiences []string
 }
 
 type Client struct {
@@ -53,6 +66,15 @@ type Client struct {
 	connected        bool
 	lastConnectError error
 	connectedMutex   sync.RWMutex
+
+	svidWaiters      map[string]chan struct{}
+	svidWaitersMutex sync.Mutex
+
+	trustBundleReady chan struct{}
+	trustBundleOnce  sync.Once
+
+	jwtSVIDCache      map[string]*jwtCacheEntry
+	jwtSVIDCacheMutex sync.RWMutex
 }
 
 func New(logger hclog.Logger, config Config) (*Client, error) {
@@ -69,13 +91,71 @@ func New(logger hclog.Logger, config Config) (*Client, error) {
 	}
 
 	client := &Client{
-		config:      config,
-		logger:      logger,
-		svidStore:   map[string]*delegatedapi.X509SVIDWithKey{},
-		parsedCerts: map[string][]*x509.Certificate{},
+		config:       config,
+		logger:       logger,
+		svidStore:    map[string]*delegatedapi.X509SVIDWithKey{},
+		parsedCerts:  map[string][]*x509.Certificate{},
+		jwtSVIDCache: map[string]*jwtCacheEntry{},
 	}
 
 	return client, nil
+}
+
+func (c *Client) WaitForSVID(ctx context.Context, spiffeID string, timeout time.Duration) error {
+	c.svidStoreMutex.RLock()
+	if _, exists := c.svidStore[spiffeID]; exists {
+		c.svidStoreMutex.RUnlock()
+		return nil
+	}
+	c.svidStoreMutex.RUnlock()
+
+	// Register waiter
+	c.svidWaitersMutex.Lock()
+	if c.svidWaiters == nil {
+		c.svidWaiters = make(map[string]chan struct{})
+	}
+	waitChan := make(chan struct{})
+	c.svidWaiters[spiffeID] = waitChan
+	c.svidWaitersMutex.Unlock()
+
+	// Wait
+	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	select {
+	case <-waitChan:
+		return nil
+	case <-timeoutCtx.Done():
+		c.svidWaitersMutex.Lock()
+		delete(c.svidWaiters, spiffeID)
+		c.svidWaitersMutex.Unlock()
+		return fmt.Errorf("timeout waiting for SVID %s", spiffeID)
+	}
+}
+
+func (c *Client) WaitForTrustBundle(ctx context.Context, timeout time.Duration) error {
+	c.parsedCertsMutex.RLock()
+	if len(c.parsedCerts) > 0 {
+		c.parsedCertsMutex.RUnlock()
+		return nil
+	}
+	c.parsedCertsMutex.RUnlock()
+
+	// Initialize channel once
+	c.trustBundleOnce.Do(func() {
+		c.trustBundleReady = make(chan struct{})
+	})
+
+	// Wait
+	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	select {
+	case <-c.trustBundleReady:
+		return nil
+	case <-timeoutCtx.Done():
+		return fmt.Errorf("timeout waiting for trust bundle")
+	}
 }
 
 func (c *Client) Start(ctx context.Context) error {
@@ -128,13 +208,83 @@ func (c *Client) FetchJWTSVID(ctx context.Context, spiffeID string, audiences []
 		return "", errors.New("not connected to SPIRE Delegated Identity API")
 	}
 
-	c.logger.Debug("Fetching JWT-SVID", "spiffeID", spiffeID, "audiences", audiences)
+	cacheKey := c.createJWTCacheKey(spiffeID, audiences)
+
+	c.jwtSVIDCacheMutex.RLock()
+	cachedEntry, exists := c.jwtSVIDCache[cacheKey]
+	c.jwtSVIDCacheMutex.RUnlock()
+
+	now := time.Now()
+
+	if exists && now.Before(cachedEntry.expiresAt) {
+		shouldRefresh := now.Add(jwtRefreshBuffer).After(cachedEntry.expiresAt)
+
+		if !shouldRefresh {
+			c.logger.Debug("JWT-SVID cache hit (fresh)",
+				"spiffeID", spiffeID,
+				"audiences", audiences,
+				"expiresAt", cachedEntry.expiresAt)
+			return cachedEntry.token, nil
+		}
+
+		c.logger.Debug("JWT-SVID needs refresh (within buffer)",
+			"spiffeID", spiffeID,
+			"audiences", audiences,
+			"expiresAt", cachedEntry.expiresAt)
+
+		resp, err := c.delegatedIdentityClient.FetchJWTSVIDs(ctx, &delegatedapi.FetchJWTSVIDsRequest{
+			Selectors: c.config.Selectors,
+			Audience:  audiences,
+		})
+
+		if err != nil {
+			// Fetch failed but we still have a valid cached token
+			c.logger.Warn("Failed to refresh JWT-SVID, using cached token",
+				"spiffeID", spiffeID,
+				"audiences", audiences,
+				"error", err,
+				"cachedTokenExpiresAt", cachedEntry.expiresAt)
+			return cachedEntry.token, nil
+		}
+
+		if len(resp.Svids) > 0 {
+			svid := resp.Svids[0]
+			expiresAt := time.Unix(svid.ExpiresAt, 0)
+
+			c.jwtSVIDCacheMutex.Lock()
+			c.jwtSVIDCache[cacheKey] = &jwtCacheEntry{
+				token:     svid.Token,
+				expiresAt: expiresAt,
+				audiences: audiences,
+			}
+			c.jwtSVIDCacheMutex.Unlock()
+
+			c.logger.Debug("JWT-SVID refreshed and cached",
+				"spiffeID", spiffeID,
+				"audiences", audiences,
+				"expiresAt", expiresAt)
+
+			return svid.Token, nil
+		}
+	}
+
+	c.logger.Debug("Fetching new JWT-SVID from SPIRE agent",
+		"spiffeID", spiffeID,
+		"audiences", audiences)
 
 	resp, err := c.delegatedIdentityClient.FetchJWTSVIDs(ctx, &delegatedapi.FetchJWTSVIDsRequest{
 		Selectors: c.config.Selectors,
 		Audience:  audiences,
 	})
 	if err != nil {
+		if exists {
+			c.logger.Error("Failed to fetch JWT-SVID, returning expired cached token",
+				"spiffeID", spiffeID,
+				"audiences", audiences,
+				"error", err,
+				"expiredAt", cachedEntry.expiresAt)
+			return cachedEntry.token, nil
+		}
 		return "", fmt.Errorf("failed to fetch JWT-SVID: %w", err)
 	}
 
@@ -142,7 +292,31 @@ func (c *Client) FetchJWTSVID(ctx context.Context, spiffeID string, audiences []
 		return "", errors.New("no JWT-SVIDs returned")
 	}
 
-	return resp.Svids[0].Token, nil
+	svid := resp.Svids[0]
+	expiresAt := time.Unix(svid.ExpiresAt, 0)
+
+	c.jwtSVIDCacheMutex.Lock()
+	c.jwtSVIDCache[cacheKey] = &jwtCacheEntry{
+		token:     svid.Token,
+		expiresAt: expiresAt,
+		audiences: audiences,
+	}
+	c.jwtSVIDCacheMutex.Unlock()
+
+	c.logger.Debug("JWT-SVID fetched and cached",
+		"spiffeID", spiffeID,
+		"audiences", audiences,
+		"expiresAt", expiresAt)
+
+	return svid.Token, nil
+}
+
+func (c *Client) createJWTCacheKey(spiffeID string, audiences []string) string {
+	sortedAudiences := make([]string, len(audiences))
+	copy(sortedAudiences, audiences)
+	sort.Strings(sortedAudiences)
+
+	return fmt.Sprintf("%s:%s", spiffeID, strings.Join(sortedAudiences, ","))
 }
 
 func (c *Client) listenForUpdates(ctx context.Context) {
@@ -311,6 +485,13 @@ func (c *Client) handleX509SVIDUpdate(svids []*delegatedapi.X509SVIDWithKey) {
 			}
 		} else {
 			c.logger.Debug("Adding newly discovered X509-SVID", "spiffeID", key)
+			// Notify any waiters for this new SVID
+			c.svidWaitersMutex.Lock()
+			if waitChan, exists := c.svidWaiters[key]; exists {
+				close(waitChan)
+				delete(c.svidWaiters, key)
+			}
+			c.svidWaitersMutex.Unlock()
 		}
 		newSvidStore[key] = svid
 	}
@@ -356,6 +537,16 @@ func (c *Client) handleX509BundleUpdate(bundles map[string][]byte) {
 	}
 
 	c.trustBundle = pool
+
+	c.trustBundleOnce.Do(func() {
+		c.trustBundleReady = make(chan struct{})
+	})
+	select {
+	case <-c.trustBundleReady:
+		// Already closed
+	default:
+		close(c.trustBundleReady)
+	}
 }
 
 func (c *Client) GetTrustBundle() (*x509.CertPool, error) {

@@ -1,0 +1,69 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: app-c
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: test-workload-sa-c
+  namespace: app-c
+---
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: spire
+  namespace: app-c
+spec:
+  provider: spire
+  parameters:
+    useCase: "mesh"
+    trustDomain: "example.org"
+    objects: |
+      - objectName: "x509"
+        type: "x509-svid"
+        filePermission: 0640
+        paths:
+          - "x509/cert.pem"
+          - "x509/key.pem"
+          - "x509/bundle.pem"
+      - objectName: "app1-jwt"
+        type: "jwt-svid"
+        filePermission: 0640
+        audience:
+          - "app1"
+        paths:
+          - "jwt/app1.token"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-workload-c
+  namespace: app-c
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: test-workload-c
+  template:
+    metadata:
+      labels:
+        app: test-workload-c
+        spiffe.io/spire-managed-identity: "true"
+    spec:
+      serviceAccountName: test-workload-sa-c
+      containers:
+        - name: alpine
+          image: alpine:3.19
+          command: ["sh", "-c", "sleep 1000000"]
+          volumeMounts:
+            - name: spire-svids
+              mountPath: "/run/spire"
+              readOnly: true
+      volumes:
+        - name: spire-svids
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: "spire"

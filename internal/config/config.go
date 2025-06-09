@@ -134,7 +134,7 @@ func (c *Config) validate() error {
 	}
 
 	if len(c.Parameters.Objects) == 0 {
-		return errors.New("no objects configured - the provider will not fetch any SPIRE certificates")
+		return errors.New("no objects configured - the provider will not fetch any SPIRE SVIDs")
 	}
 
 	objectNames := map[string]struct{}{}
