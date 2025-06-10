@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"time"
 
 	"github.com/hashicorp/go-hclog"
 	pb "sigs.k8s.io/secrets-store-csi-driver/provider/v1alpha1"
+	"spire-csi-provider/internal/client"
 	"spire-csi-provider/internal/config"
 	"spire-csi-provider/internal/hmac"
 	"spire-csi-provider/internal/metrics"
@@ -15,19 +17,50 @@ import (
 	"spire-csi-provider/internal/version"
 )
 
+type healthServer struct {
+	logger hclog.Logger
+}
+
+func (s *healthServer) Check(ctx context.Context, req *healthpb.HealthCheckRequest) (*healthpb.HealthCheckResponse, error) {
+	s.logger.Trace("health check requested", "service", req.Service)
+	metrics.HealthCheckStatus.Set(1)
+	return &healthpb.HealthCheckResponse{Status: healthpb.HealthCheckResponse_SERVING}, nil
+}
+
+func (s *healthServer) Watch(req *healthpb.HealthCheckRequest, ws healthpb.Health_WatchServer) error {
+	s.logger.Trace("health watch requested", "service", req.Service)
+	return nil
+}
+
 type Server struct {
 	logger        hclog.Logger
 	flagsConfig   config.FlagsConfig
 	hmacGenerator *hmac.HMACGenerator
+
+	clientPool *client.ClientPool
+
 	pb.UnimplementedCSIDriverProviderServer
 }
 
 func NewServer(logger hclog.Logger, flagsConfig config.FlagsConfig, hmacGenerator *hmac.HMACGenerator) *Server {
-	return &Server{
+	s := &Server{
 		logger:        logger.Named("server"),
 		flagsConfig:   flagsConfig,
 		hmacGenerator: hmacGenerator,
 	}
+
+	poolConfig := client.PoolConfig{
+		StaleTimeout:    flagsConfig.ProviderStaleTimeout,
+		CleanupInterval: flagsConfig.ProviderCleanupInterval,
+	}
+	s.clientPool = client.NewClientPool(logger, poolConfig)
+
+	s.logger.Info("SPIRE client pool initialized",
+		"stale_timeout", poolConfig.StaleTimeout,
+		"cleanup_interval", poolConfig.CleanupInterval,
+	)
+
+	return s
 }
 
 func (s *Server) Version(ctx context.Context, req *pb.VersionRequest) (*pb.VersionResponse, error) {
@@ -160,7 +193,17 @@ func (s *Server) Mount(ctx context.Context, req *pb.MountRequest) (*pb.MountResp
 		}
 	}
 
-	spireProvider := provider.NewProviderWithContext(s.logger.Named("provider"), s.hmacGenerator, podContext)
+	var spireProvider *provider.Provider
+
+	s.logger.Debug("creating provider with client pool",
+		"request_id", requestID,
+	)
+	spireProvider = provider.NewProviderWithClientPool(
+		s.logger.Named("provider"),
+		s.hmacGenerator,
+		podContext,
+		s.clientPool,
+	)
 
 	resp, err := spireProvider.HandleMountRequest(ctx, cfg, s.flagsConfig)
 	if err != nil {
@@ -205,9 +248,28 @@ func (s *Server) Mount(ctx context.Context, req *pb.MountRequest) (*pb.MountResp
 		)
 	}
 
+	stats := s.clientPool.GetPoolStats()
+	s.logger.Debug("client pool stats",
+		"request_id", requestID,
+		"total_clients", stats["total_clients"],
+		"active_clients", stats["active_clients"],
+		"total_refs", stats["total_refs"],
+	)
+
 	metrics.RecordMountRequest("success", duration.Seconds(), podContext)
 
 	return resp, nil
+}
+
+func (s *Server) Shutdown() error {
+	s.logger.Info("shutting down server")
+
+	if err := s.clientPool.Shutdown(); err != nil {
+		s.logger.Error("failed to shutdown client pool", "error", err)
+		return err
+	}
+
+	return nil
 }
 
 func generateRequestID() string {

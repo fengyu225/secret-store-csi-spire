@@ -415,7 +415,7 @@ func (c *Client) listenForUpdates(ctx context.Context) {
 
 			cancel()
 			c.connectionAttempts++
-			c.listenForUpdates(ctx)
+			go c.listenForUpdates(ctx)
 			return
 		}
 	}

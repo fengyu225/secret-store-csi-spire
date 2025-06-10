@@ -101,6 +101,38 @@ var (
 			Help: "Health check status (1 = healthy, 0 = unhealthy)",
 		},
 	)
+
+	ProviderPoolSize = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "spire_csi_provider_pool_size",
+			Help: "Current size of SPIRE client pool",
+		},
+		[]string{"trust_domain"},
+	)
+
+	ProviderPoolHits = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "spire_csi_provider_pool_hits_total",
+			Help: "Total number of SPIRE client pool hits",
+		},
+		[]string{"trust_domain", "namespace", "service_account"},
+	)
+
+	ProviderPoolMisses = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "spire_csi_provider_pool_misses_total",
+			Help: "Total number of SPIRE client pool misses",
+		},
+		[]string{"trust_domain", "namespace", "service_account"},
+	)
+
+	ProviderPoolEvictions = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "spire_csi_provider_pool_evictions_total",
+			Help: "Total number of SPIRE client evictions from pool",
+		},
+		[]string{"reason"},
+	)
 )
 
 type PodContext struct {
@@ -150,4 +182,21 @@ func RecordJWTCacheMiss(ctx PodContext) {
 func UpdateCacheSizes(jwtCacheSize, svidCacheSize int, ctx PodContext) {
 	JWTCacheSize.WithLabelValues(ctx.Namespace, ctx.ServiceAccount, ctx.PodUID).Set(float64(jwtCacheSize))
 	SVIDCacheSize.WithLabelValues(ctx.Namespace, ctx.ServiceAccount, ctx.PodUID).Set(float64(svidCacheSize))
+}
+
+// Client pool metrics
+func UpdateProviderPoolSize(trustDomain string, size int) {
+	ProviderPoolSize.WithLabelValues(trustDomain).Set(float64(size))
+}
+
+func RecordProviderPoolHit(trustDomain, namespace, serviceAccount string) {
+	ProviderPoolHits.WithLabelValues(trustDomain, namespace, serviceAccount).Inc()
+}
+
+func RecordProviderPoolMiss(trustDomain, namespace, serviceAccount string) {
+	ProviderPoolMisses.WithLabelValues(trustDomain, namespace, serviceAccount).Inc()
+}
+
+func RecordProviderEviction(reason string) {
+	ProviderPoolEvictions.WithLabelValues(reason).Inc()
 }

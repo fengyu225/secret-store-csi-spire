@@ -26,13 +26,7 @@ type Provider struct {
 	spireClient      *client.Client
 	spireClientMutex sync.RWMutex
 	clientConfig     client.Config
-}
-
-func NewProvider(logger hclog.Logger, hmacGenerator *hmac.HMACGenerator) *Provider {
-	return &Provider{
-		logger:        logger,
-		hmacGenerator: hmacGenerator,
-	}
+	clientPool       *client.ClientPool
 }
 
 func NewProviderWithContext(logger hclog.Logger, hmacGenerator *hmac.HMACGenerator, podContext metrics.PodContext) *Provider {
@@ -40,6 +34,15 @@ func NewProviderWithContext(logger hclog.Logger, hmacGenerator *hmac.HMACGenerat
 		logger:        logger,
 		hmacGenerator: hmacGenerator,
 		podContext:    podContext,
+	}
+}
+
+func NewProviderWithClientPool(logger hclog.Logger, hmacGenerator *hmac.HMACGenerator, podContext metrics.PodContext, clientPool *client.ClientPool) *Provider {
+	return &Provider{
+		logger:        logger,
+		hmacGenerator: hmacGenerator,
+		podContext:    podContext,
+		clientPool:    clientPool,
 	}
 }
 
@@ -57,16 +60,44 @@ func (p *Provider) HandleMountRequest(ctx context.Context, cfg config.Config, fl
 		"trust_domain", cfg.Parameters.TrustDomain,
 		"object_count", len(cfg.Parameters.Objects),
 		"socket_path", socketPath,
+		"using_pool", p.clientPool != nil,
 	)
 
 	spiffeID := p.buildSpiffeIDFromSelectors(cfg.Parameters)
 	p.logger.Debug("built SPIFFE ID from selectors", "spiffe_id", spiffeID)
 
-	spireClient, err := p.getOrCreateSpireClient(ctx, socketPath, cfg.Parameters.TrustDomain, cfg.Parameters.Selectors)
-	if err != nil {
-		p.logger.Error("failed to get SPIRE client", "error", err)
-		return nil, fmt.Errorf("failed to get SPIRE client: %w", err)
+	var spireClient *client.Client
+	var releaseFunc func()
+	var err error
+
+	if p.clientPool != nil {
+		clientConfig := client.Config{
+			SpireSocketPath:   socketPath,
+			SpiffeTrustDomain: cfg.Parameters.TrustDomain,
+			Selectors:         convertConfigSelectorsToAPISelectors(cfg.Parameters.Selectors),
+			RotatedQueueSize:  1024,
+			PodContext:        p.podContext,
+		}
+
+		spireClient, err = p.clientPool.AcquireClient(ctx, clientConfig)
+		if err != nil {
+			p.logger.Error("failed to acquire SPIRE client from pool", "error", err)
+			return nil, fmt.Errorf("failed to acquire SPIRE client from pool: %w", err)
+		}
+
+		releaseFunc = func() {
+			p.clientPool.ReleaseClient(clientConfig)
+		}
+	} else {
+		spireClient, err = p.getOrCreateSpireClient(ctx, socketPath, cfg.Parameters.TrustDomain, cfg.Parameters.Selectors)
+		if err != nil {
+			p.logger.Error("failed to get SPIRE client", "error", err)
+			return nil, fmt.Errorf("failed to get SPIRE client: %w", err)
+		}
+		releaseFunc = func() {} // No-op for non-pooled clients
 	}
+
+	defer releaseFunc()
 
 	p.logger.Info("waiting for SVID and trust bundle",
 		"spiffe_id", spiffeID,

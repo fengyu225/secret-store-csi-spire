@@ -50,6 +50,8 @@ func main() {
 	flag.IntVar(&flagsConfig.CacheSize, "cacheSize", 100, "Size of the client cache (set to <= 0 to disable caching)")
 	flag.StringVar(&flagsConfig.SpireSocketPath, "socketPath", "/run/spire/agent-sockets/spire-agent.sock", "Path to the SPIRE Workload API socket")
 	flag.StringVar(&flagsConfig.MetricsAddr, "metricsAddr", ":8081", "Address for metrics server")
+	flag.DurationVar(&flagsConfig.ProviderStaleTimeout, "providerStaleTimeout", 10*time.Minute, "Time after which an unused SPIRE client is considered stale")
+	flag.DurationVar(&flagsConfig.ProviderCleanupInterval, "providerCleanupInterval", 5*time.Minute, "Interval for cleaning up stale SPIRE clients")
 	flag.Parse()
 
 	if flagsConfig.Version {
@@ -90,6 +92,8 @@ func main() {
 		"hmac_secret_name", flagsConfig.HMACSecretName,
 		"cache_size", flagsConfig.CacheSize,
 		"spire_socket_path", flagsConfig.SpireSocketPath,
+		"provider_stale_timeout", flagsConfig.ProviderStaleTimeout,
+		"provider_cleanup_interval", flagsConfig.ProviderCleanupInterval,
 	)
 
 	hmacGenerator := hmac.NewHMACGenerator(nil)
@@ -177,6 +181,11 @@ func main() {
 	shutdownDone := make(chan struct{})
 	go func() {
 		grpcServer.GracefulStop()
+
+		if err := providerServer.Shutdown(); err != nil {
+			logger.Error("failed to shutdown provider server", "error", err)
+		}
+
 		close(shutdownDone)
 	}()
 

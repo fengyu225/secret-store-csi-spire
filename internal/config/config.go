@@ -26,6 +26,9 @@ type FlagsConfig struct {
 	CacheSize       int
 	SpireSocketPath string
 	MetricsAddr     string
+
+	ProviderStaleTimeout    time.Duration
+	ProviderCleanupInterval time.Duration
 }
 
 type Parameters struct {
