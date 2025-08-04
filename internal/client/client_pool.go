@@ -26,7 +26,7 @@ type ClientPool struct {
 }
 
 type poolEntry struct {
-	client       *Client
+	client       SpireClient
 	key          string
 	lastAccessed time.Time
 	refCount     int
@@ -59,7 +59,7 @@ func NewClientPool(logger hclog.Logger, config PoolConfig) *ClientPool {
 	return pool
 }
 
-func (p *ClientPool) AcquireClient(ctx context.Context, config Config) (*Client, error) {
+func (p *ClientPool) AcquireClient(ctx context.Context, config Config) (SpireClient, error) {
 	key := p.buildClientKey(config)
 
 	p.mu.RLock()
@@ -100,7 +100,7 @@ func (p *ClientPool) AcquireClient(ctx context.Context, config Config) (*Client,
 		"pool_size", len(p.clients),
 	)
 
-	client, err := New(p.logger.Named("spire-client"), config)
+	client, err := NewSpireClient(p.logger.Named("spire-client"), config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create SPIRE client: %w", err)
 	}
@@ -150,10 +150,11 @@ func (p *ClientPool) ReleaseClient(config Config) {
 }
 
 // buildClientKey creates a unique key for client pooling
-// Format: socketPath|trustDomain|selector1|selector2|...
+// Format: socketPath|socketPath2|trustDomain|selector1|selector2|...
 func (p *ClientPool) buildClientKey(config Config) string {
 	parts := []string{
 		config.SpireSocketPath,
+		config.SpireSocketPath2,
 		config.SpiffeTrustDomain,
 	}
 

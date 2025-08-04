@@ -41,7 +41,7 @@ metadata:
   name: test-workload-a
   namespace: app-a
 spec:
-  replicas: 5
+  replicas: 1
   selector:
     matchLabels:
       app: test-workload-a

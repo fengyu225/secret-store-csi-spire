@@ -9,13 +9,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hashicorp/go-hclog"
-	typesapi "github.com/spiffe/spire-api-sdk/proto/spire/api/types"
-	pb "sigs.k8s.io/secrets-store-csi-driver/provider/v1alpha1"
 	"spire-csi-provider/internal/client"
 	"spire-csi-provider/internal/config"
 	"spire-csi-provider/internal/hmac"
 	"spire-csi-provider/internal/metrics"
+
+	"github.com/hashicorp/go-hclog"
+	typesapi "github.com/spiffe/spire-api-sdk/proto/spire/api/types"
+	pb "sigs.k8s.io/secrets-store-csi-driver/provider/v1alpha1"
 )
 
 type Provider struct {
@@ -23,7 +24,7 @@ type Provider struct {
 	hmacGenerator *hmac.HMACGenerator
 	podContext    metrics.PodContext
 
-	spireClient      *client.Client
+	spireClient      client.SpireClient
 	spireClientMutex sync.RWMutex
 	clientConfig     client.Config
 	clientPool       *client.ClientPool
@@ -66,13 +67,14 @@ func (p *Provider) HandleMountRequest(ctx context.Context, cfg config.Config, fl
 	spiffeID := p.buildSpiffeIDFromSelectors(cfg.Parameters)
 	p.logger.Debug("built SPIFFE ID from selectors", "spiffe_id", spiffeID)
 
-	var spireClient *client.Client
+	var spireClient client.SpireClient
 	var releaseFunc func()
 	var err error
 
 	if p.clientPool != nil {
 		clientConfig := client.Config{
 			SpireSocketPath:   socketPath,
+			SpireSocketPath2:  flagsConfig.SpireSocketPath2,
 			SpiffeTrustDomain: cfg.Parameters.TrustDomain,
 			Selectors:         convertConfigSelectorsToAPISelectors(cfg.Parameters.Selectors),
 			RotatedQueueSize:  1024,
@@ -89,7 +91,7 @@ func (p *Provider) HandleMountRequest(ctx context.Context, cfg config.Config, fl
 			p.clientPool.ReleaseClient(clientConfig)
 		}
 	} else {
-		spireClient, err = p.getOrCreateSpireClient(ctx, socketPath, cfg.Parameters.TrustDomain, cfg.Parameters.Selectors)
+		spireClient, err = p.getOrCreateSpireClient(ctx, socketPath, cfg.Parameters.TrustDomain, cfg.Parameters.Selectors, flagsConfig)
 		if err != nil {
 			p.logger.Error("failed to get SPIRE client", "error", err)
 			return nil, fmt.Errorf("failed to get SPIRE client: %w", err)
@@ -277,7 +279,7 @@ func (p *Provider) buildSpiffeIDFromSelectors(params config.Parameters) string {
 	return ""
 }
 
-func (p *Provider) fetchX509SVID(ctx context.Context, spireClient *client.Client, object config.Object, spiffeID string) (map[string][]byte, error) {
+func (p *Provider) fetchX509SVID(ctx context.Context, spireClient client.SpireClient, object config.Object, spiffeID string) (map[string][]byte, error) {
 	start := time.Now()
 	p.logger.Debug("fetching X509 SVID",
 		"spiffe_id", spiffeID,
@@ -420,7 +422,7 @@ func (p *Provider) fetchX509SVID(ctx context.Context, spireClient *client.Client
 	return result, nil
 }
 
-func (p *Provider) getOrCreateSpireClient(ctx context.Context, socketPath string, trustDomain string, selectors []config.Selector) (*client.Client, error) {
+func (p *Provider) getOrCreateSpireClient(ctx context.Context, socketPath string, trustDomain string, selectors []config.Selector, flagsConfig config.FlagsConfig) (client.SpireClient, error) {
 	p.spireClientMutex.RLock()
 	if p.spireClient != nil {
 		// Check if the configuration matches
@@ -447,13 +449,14 @@ func (p *Provider) getOrCreateSpireClient(ctx context.Context, socketPath string
 
 	clientConfig := client.Config{
 		SpireSocketPath:   socketPath,
+		SpireSocketPath2:  flagsConfig.SpireSocketPath2,
 		SpiffeTrustDomain: trustDomain,
 		Selectors:         convertConfigSelectorsToAPISelectors(selectors),
 		RotatedQueueSize:  1024,
 		PodContext:        p.podContext,
 	}
 
-	spireClient, err := client.New(p.logger.Named("spire-client"), clientConfig)
+	spireClient, err := client.NewSpireClient(p.logger.Named("spire-client"), clientConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create SPIRE client: %w", err)
 	}
@@ -486,7 +489,7 @@ func (p *Provider) Stop() error {
 	return nil
 }
 
-func (p *Provider) fetchJWTSVID(ctx context.Context, spireClient *client.Client, object config.Object, spiffeID string) (map[string][]byte, error) {
+func (p *Provider) fetchJWTSVID(ctx context.Context, spireClient client.SpireClient, object config.Object, spiffeID string) (map[string][]byte, error) {
 	start := time.Now()
 	p.logger.Debug("fetching JWT SVID",
 		"spiffe_id", spiffeID,

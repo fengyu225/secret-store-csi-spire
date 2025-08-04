@@ -32,11 +32,12 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet
       containers:
         - name: provider
-          image: fengyu225/secrets-store-csi-provider-spire:v0.0.1
+          image: fengyu225/secrets-store-csi-provider-spire:v0.0.2
           imagePullPolicy: Always
           args:
             - -endpoint=/provider/spire.sock
             - -socketPath=/run/spire/admin-socket/socket
+            - -socketPath2=/run/spire/admin-socket/socket
             - -logLevel=debug
             - -healthAddr=:8080
             - -metricsAddr=:8081

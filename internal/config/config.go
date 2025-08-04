@@ -18,14 +18,15 @@ type Config struct {
 }
 
 type FlagsConfig struct {
-	Endpoint        string
-	LogLevel        string
-	Version         bool
-	HealthAddr      string
-	HMACSecretName  string
-	CacheSize       int
-	SpireSocketPath string
-	MetricsAddr     string
+	Endpoint         string
+	LogLevel         string
+	Version          bool
+	HealthAddr       string
+	HMACSecretName   string
+	CacheSize        int
+	SpireSocketPath  string
+	SpireSocketPath2 string
+	MetricsAddr      string
 
 	ProviderStaleTimeout    time.Duration
 	ProviderCleanupInterval time.Duration

@@ -1,4 +1,4 @@
-VERSION ?= v0.0.1
+VERSION ?= v0.0.2
 REGISTRY ?= fengyu225
 NAME ?= secrets-store-csi-provider-spire
 IMAGE_TAG ?= $(VERSION)

@@ -48,7 +48,8 @@ func main() {
 	flag.StringVar(&flagsConfig.HealthAddr, "healthAddr", ":8080", "Address for health check server")
 	flag.StringVar(&flagsConfig.HMACSecretName, "hmacSecretName", "spire-csi-provider-hmac", "Name of the Kubernetes secret containing the HMAC key")
 	flag.IntVar(&flagsConfig.CacheSize, "cacheSize", 100, "Size of the client cache (set to <= 0 to disable caching)")
-	flag.StringVar(&flagsConfig.SpireSocketPath, "socketPath", "/run/spire/agent-sockets/spire-agent.sock", "Path to the SPIRE Workload API socket")
+	flag.StringVar(&flagsConfig.SpireSocketPath, "socketPath", "/run/spire/agent-sockets/spire-agent.sock", "Path to the primary SPIRE Workload API socket")
+	flag.StringVar(&flagsConfig.SpireSocketPath2, "socketPath2", "", "Path to the secondary SPIRE Workload API socket (enables dual agent mode)")
 	flag.StringVar(&flagsConfig.MetricsAddr, "metricsAddr", ":8081", "Address for metrics server")
 	flag.DurationVar(&flagsConfig.ProviderStaleTimeout, "providerStaleTimeout", 10*time.Minute, "Time after which an unused SPIRE client is considered stale")
 	flag.DurationVar(&flagsConfig.ProviderCleanupInterval, "providerCleanupInterval", 5*time.Minute, "Interval for cleaning up stale SPIRE clients")
@@ -92,12 +93,20 @@ func main() {
 		"hmac_secret_name", flagsConfig.HMACSecretName,
 		"cache_size", flagsConfig.CacheSize,
 		"spire_socket_path", flagsConfig.SpireSocketPath,
+		"spire_socket_path2", flagsConfig.SpireSocketPath2,
+		"dual_agent_mode", flagsConfig.SpireSocketPath2 != "",
 		"provider_stale_timeout", flagsConfig.ProviderStaleTimeout,
 		"provider_cleanup_interval", flagsConfig.ProviderCleanupInterval,
 	)
 
 	hmacGenerator := hmac.NewHMACGenerator(nil)
 	logger.Debug("HMAC generator initialized")
+
+	if flagsConfig.SpireSocketPath2 != "" {
+		logger.Info("dual agent mode enabled",
+			"socket1", flagsConfig.SpireSocketPath,
+			"socket2", flagsConfig.SpireSocketPath2)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

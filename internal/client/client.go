@@ -33,6 +33,7 @@ type CertificateRotationEvent struct {
 
 type Config struct {
 	SpireSocketPath   string
+	SpireSocketPath2  string
 	SpiffeTrustDomain string
 	Selectors         []*typesapi.Selector
 	RotatedQueueSize  int
