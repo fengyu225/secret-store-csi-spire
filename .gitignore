@@ -3,3 +3,6 @@
 spire/vault/certs
 spire/vault/vault-certs-secret.yaml
 .history
+bin
+coverage.html
+coverage.out

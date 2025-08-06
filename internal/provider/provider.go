@@ -27,7 +27,7 @@ type Provider struct {
 	spireClient      client.SpireClient
 	spireClientMutex sync.RWMutex
 	clientConfig     client.Config
-	clientPool       *client.ClientPool
+	clientPool       client.ClientPoolInterface
 }
 
 func NewProviderWithContext(logger hclog.Logger, hmacGenerator *hmac.HMACGenerator, podContext metrics.PodContext) *Provider {
@@ -38,7 +38,7 @@ func NewProviderWithContext(logger hclog.Logger, hmacGenerator *hmac.HMACGenerat
 	}
 }
 
-func NewProviderWithClientPool(logger hclog.Logger, hmacGenerator *hmac.HMACGenerator, podContext metrics.PodContext, clientPool *client.ClientPool) *Provider {
+func NewProviderWithClientPool(logger hclog.Logger, hmacGenerator *hmac.HMACGenerator, podContext metrics.PodContext, clientPool client.ClientPoolInterface) *Provider {
 	return &Provider{
 		logger:        logger,
 		hmacGenerator: hmacGenerator,
@@ -66,6 +66,11 @@ func (p *Provider) HandleMountRequest(ctx context.Context, cfg config.Config, fl
 
 	spiffeID := p.buildSpiffeIDFromSelectors(cfg.Parameters)
 	p.logger.Debug("built SPIFFE ID from selectors", "spiffe_id", spiffeID)
+
+	if spiffeID == "" {
+		p.logger.Error("unable to build valid SPIFFE ID from selectors")
+		return nil, fmt.Errorf("unable to build valid SPIFFE ID from selectors")
+	}
 
 	var spireClient client.SpireClient
 	var releaseFunc func()

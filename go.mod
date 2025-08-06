@@ -3,6 +3,7 @@ module spire-csi-provider
 go 1.23.7
 
 require (
+	github.com/golang/mock v1.4.4
 	github.com/hashicorp/go-hclog v1.5.0
 	github.com/prometheus/client_golang v1.12.2
 	github.com/spiffe/spire-api-sdk v1.12.0

@@ -37,7 +37,7 @@ type Server struct {
 	flagsConfig   config.FlagsConfig
 	hmacGenerator *hmac.HMACGenerator
 
-	clientPool *client.ClientPool
+	clientPool client.ClientPoolInterface
 
 	pb.UnimplementedCSIDriverProviderServer
 }

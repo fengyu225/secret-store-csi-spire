@@ -9,7 +9,6 @@ metadata:
   name: spire-csi-provider
   namespace: csi
 ---
----
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -32,7 +31,7 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet
       containers:
         - name: provider
-          image: fengyu225/secrets-store-csi-provider-spire:v0.0.2
+          image: fengyu225/secrets-store-csi-provider-spire:v0.0.3
           imagePullPolicy: Always
           args:
             - -endpoint=/provider/spire.sock
@@ -107,29 +106,3 @@ spec:
           hostPath:
             path: "/run/spire/admin-socket"
             type: Directory
----
-apiVersion: secrets-store.csi.x-k8s.io/v1
-kind: SecretProviderClass
-metadata:
-  name: spire
-  namespace: app
-spec:
-  provider: spire
-  parameters:
-    useCase: "mesh"
-    trustDomain: "example.org"
-    objects: |
-      - objectName: "x509"
-        type: "x509-svid"
-        filePermission: 0640
-        paths:
-          - "x509/cert.pem"
-          - "x509/key.pem"
-          - "x509/bundle.pem"
-      - objectName: "app1-jwt"
-        type: "jwt-svid"
-        filePermission: 0640
-        audience:
-          - "app1"
-        paths:
-          - "jwt/app1.token"

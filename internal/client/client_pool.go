@@ -23,6 +23,8 @@ type ClientPool struct {
 	cleanupInterval time.Duration
 
 	cleanupCancel context.CancelFunc
+
+	clientFactory func(hclog.Logger, Config) (SpireClient, error)
 }
 
 type poolEntry struct {
@@ -50,6 +52,7 @@ func NewClientPool(logger hclog.Logger, config PoolConfig) *ClientPool {
 		clients:         make(map[string]*poolEntry),
 		staleTimeout:    config.StaleTimeout,
 		cleanupInterval: config.CleanupInterval,
+		clientFactory:   NewSpireClient,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -100,7 +103,7 @@ func (p *ClientPool) AcquireClient(ctx context.Context, config Config) (SpireCli
 		"pool_size", len(p.clients),
 	)
 
-	client, err := NewSpireClient(p.logger.Named("spire-client"), config)
+	client, err := p.clientFactory(p.logger.Named("spire-client"), config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create SPIRE client: %w", err)
 	}

@@ -15,8 +15,8 @@ import (
 type DualAgentClient struct {
 	logger  hclog.Logger
 	config  Config
-	client1 *Client
-	client2 *Client
+	client1 SpireClient
+	client2 SpireClient
 
 	// For managing concurrent operations
 	cancelFunc context.CancelFunc
