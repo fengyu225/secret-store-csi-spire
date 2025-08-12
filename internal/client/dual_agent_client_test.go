@@ -54,6 +54,16 @@ func TestNewDualAgentClient(t *testing.T) {
 			wantErr: true,
 			errMsg:  "SPIRE trust domain not specified",
 		},
+		{
+			name: "identical socket paths",
+			config: Config{
+				SpireSocketPath:   "/same/socket",
+				SpireSocketPath2:  "/same/socket",
+				SpiffeTrustDomain: "example.org",
+			},
+			wantErr: true,
+			errMsg:  "socket paths must be different for dual agent redundancy",
+		},
 	}
 
 	for _, tt := range tests {
@@ -190,16 +200,30 @@ func TestDualAgentClient_WaitForSVID(t *testing.T) {
 			mockClient1 := NewMockSpireClient(ctrl)
 			mockClient2 := NewMockSpireClient(ctrl)
 
-			// Both clients are called concurrently, but one might be cancelled
-			// if the other succeeds quickly
 			mockClient1.EXPECT().
 				WaitForSVID(gomock.Any(), gomock.Any(), gomock.Any()).
-				Return(tt.client1Error).
+				DoAndReturn(func(ctx context.Context, spiffeID string, timeout time.Duration) error {
+					// Simulate some processing time
+					select {
+					case <-time.After(10 * time.Millisecond):
+						return tt.client1Error
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				}).
 				AnyTimes()
 
 			mockClient2.EXPECT().
 				WaitForSVID(gomock.Any(), gomock.Any(), gomock.Any()).
-				Return(tt.client2Error).
+				DoAndReturn(func(ctx context.Context, spiffeID string, timeout time.Duration) error {
+					// Simulate some processing time
+					select {
+					case <-time.After(10 * time.Millisecond):
+						return tt.client2Error
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				}).
 				AnyTimes()
 
 			dac := &DualAgentClient{
@@ -224,71 +248,7 @@ func TestDualAgentClient_WaitForSVID(t *testing.T) {
 	}
 }
 
-//func TestDualAgentClient_WaitForSVID(t *testing.T) {
-//	tests := []struct {
-//		name         string
-//		client1Error error
-//		client2Error error
-//		expectError  bool
-//	}{
-//		{
-//			name:        "client1 succeeds",
-//			expectError: false,
-//		},
-//		{
-//			name:         "client1 fails, client2 succeeds",
-//			client1Error: errors.New("client1 failed"),
-//			expectError:  false,
-//		},
-//		{
-//			name:         "both clients fail",
-//			client1Error: errors.New("client1 failed"),
-//			client2Error: errors.New("client2 failed"),
-//			expectError:  true,
-//		},
-//	}
-//
-//	for _, tt := range tests {
-//		t.Run(tt.name, func(t *testing.T) {
-//			ctrl := gomock.NewController(t)
-//			defer ctrl.Finish()
-//
-//			logger := hclog.NewNullLogger()
-//
-//			mockClient1 := NewMockSpireClient(ctrl)
-//			mockClient1.EXPECT().WaitForSVID(gomock.Any(), gomock.Any(), gomock.Any()).Return(tt.client1Error)
-//
-//			mockClient2 := NewMockSpireClient(ctrl)
-//			if tt.client1Error != nil {
-//				mockClient2.EXPECT().WaitForSVID(gomock.Any(), gomock.Any(), gomock.Any()).Return(tt.client2Error)
-//			}
-//
-//			dac := &DualAgentClient{
-//				logger:  logger,
-//				client1: mockClient1,
-//				client2: mockClient2,
-//			}
-//
-//			ctx := context.Background()
-//			err := dac.WaitForSVID(ctx, "spiffe://example.org/test", 1*time.Second)
-//
-//			if tt.expectError {
-//				if err == nil {
-//					t.Error("Expected error but got none")
-//				}
-//			} else {
-//				if err != nil {
-//					t.Errorf("Unexpected error: %v", err)
-//				}
-//			}
-//		})
-//	}
-//}
-
 func TestDualAgentClient_GetCertificateForIdentity(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
 	logger := hclog.NewNullLogger()
 
 	cert := &tls.Certificate{
@@ -324,13 +284,21 @@ func TestDualAgentClient_GetCertificateForIdentity(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mockClient1 := NewMockSpireClient(ctrl)
-			mockClient1.EXPECT().GetCertificateForIdentity(gomock.Any()).Return(tt.client1Return, tt.client1Error)
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
 
+			mockClient1 := NewMockSpireClient(ctrl)
 			mockClient2 := NewMockSpireClient(ctrl)
-			if tt.client1Error != nil {
-				mockClient2.EXPECT().GetCertificateForIdentity(gomock.Any()).Return(tt.client2Return, tt.client2Error)
-			}
+
+			mockClient1.EXPECT().
+				GetCertificateForIdentity(gomock.Any()).
+				Return(tt.client1Return, tt.client1Error).
+				AnyTimes()
+
+			mockClient2.EXPECT().
+				GetCertificateForIdentity(gomock.Any()).
+				Return(tt.client2Return, tt.client2Error).
+				AnyTimes()
 
 			dac := &DualAgentClient{
 				logger:  logger,

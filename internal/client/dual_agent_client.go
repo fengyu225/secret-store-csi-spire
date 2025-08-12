@@ -28,6 +28,10 @@ func NewDualAgentClient(logger hclog.Logger, config Config) (*DualAgentClient, e
 		return nil, errors.New("second socket path is required for dual agent client")
 	}
 
+	if config.SpireSocketPath == config.SpireSocketPath2 {
+		return nil, errors.New("socket paths must be different for dual agent redundancy")
+	}
+
 	dac := &DualAgentClient{
 		logger: logger.Named("dual-agent"),
 		config: config,
@@ -35,6 +39,7 @@ func NewDualAgentClient(logger hclog.Logger, config Config) (*DualAgentClient, e
 
 	config1 := config
 	config1.SpireSocketPath = config.SpireSocketPath
+	config1.AgentID = "agent1"
 	client1, err := New(logger.Named("agent1"), config1)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create client1: %w", err)
@@ -43,6 +48,7 @@ func NewDualAgentClient(logger hclog.Logger, config Config) (*DualAgentClient, e
 
 	config2 := config
 	config2.SpireSocketPath = config.SpireSocketPath2
+	config2.AgentID = "agent2"
 	client2, err := New(logger.Named("agent2"), config2)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create client2: %w", err)
@@ -64,18 +70,24 @@ func (dac *DualAgentClient) Start(ctx context.Context) error {
 	errChan := make(chan error, 2)
 
 	go func() {
-		if err := dac.client1.Start(ctx); err != nil {
+		ctx1, cancel1 := context.WithCancel(ctx)
+		if err := dac.client1.Start(ctx1); err != nil {
 			errChan <- fmt.Errorf("client1 start failed: %w", err)
+			cancel1()
 		} else {
 			errChan <- nil
+			cancel1()
 		}
 	}()
 
 	go func() {
-		if err := dac.client2.Start(ctx); err != nil {
+		ctx2, cancel2 := context.WithCancel(ctx)
+		if err := dac.client2.Start(ctx2); err != nil {
 			errChan <- fmt.Errorf("client2 start failed: %w", err)
+			cancel2()
 		} else {
 			errChan <- nil
+			cancel2()
 		}
 	}()
 
@@ -98,80 +110,201 @@ func (dac *DualAgentClient) Start(ctx context.Context) error {
 
 // WaitForSVID waits for SVID from either client
 func (dac *DualAgentClient) WaitForSVID(ctx context.Context, spiffeID string, timeout time.Duration) error {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	type result struct {
+		err    error
+		client string
+	}
+
+	resultChan := make(chan result, 2)
+
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	errChan := make(chan error, 2)
-
 	go func() {
-		errChan <- dac.client1.WaitForSVID(ctx, spiffeID, timeout)
+		err := dac.client1.WaitForSVID(waitCtx, spiffeID, timeout)
+		resultChan <- result{err: err, client: "agent1"}
 	}()
 
 	go func() {
-		errChan <- dac.client2.WaitForSVID(ctx, spiffeID, timeout)
+		err := dac.client2.WaitForSVID(waitCtx, spiffeID, timeout)
+		resultChan <- result{err: err, client: "agent2"}
 	}()
 
-	// Return when first client succeeds
+	var results []result
+	timeoutChan := time.After(timeout + 30*time.Second)
+
 	for i := 0; i < 2; i++ {
 		select {
-		case err := <-errChan:
-			if err == nil {
+		case res := <-resultChan:
+			results = append(results, res)
+			// Return when first client succeeds
+			if res.err == nil {
+				dac.logger.Info("successfully waited for SVID",
+					"client", res.client,
+					"spiffe_id", spiffeID)
 				return nil
 			}
 			dac.logger.Debug("client failed to provide SVID",
+				"client", res.client,
 				"spiffe_id", spiffeID,
-				"error", err)
-		case <-ctx.Done():
+				"error", res.err)
+		case <-timeoutChan:
+			dac.logger.Error("timeout waiting for SVID from clients",
+				"spiffe_id", spiffeID,
+				"timeout", timeout)
 			return fmt.Errorf("timeout waiting for SVID %s", spiffeID)
+		case <-ctx.Done():
+			dac.logger.Debug("context cancelled while waiting for SVID",
+				"spiffe_id", spiffeID)
+			return ctx.Err()
 		}
 	}
 
+	dac.logger.Error("no client could provide SVID",
+		"spiffe_id", spiffeID,
+		"client_count", len(results))
 	return fmt.Errorf("no client could provide SVID for %s", spiffeID)
 }
 
 // WaitForTrustBundle waits for trust bundle from either client
 func (dac *DualAgentClient) WaitForTrustBundle(ctx context.Context, timeout time.Duration) error {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	type result struct {
+		err    error
+		client string
+	}
+
+	resultChan := make(chan result, 2)
+
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	errChan := make(chan error, 2)
-
 	go func() {
-		errChan <- dac.client1.WaitForTrustBundle(ctx, timeout)
+		err := dac.client1.WaitForTrustBundle(waitCtx, timeout)
+		resultChan <- result{err: err, client: "agent1"}
 	}()
 
 	go func() {
-		errChan <- dac.client2.WaitForTrustBundle(ctx, timeout)
+		err := dac.client2.WaitForTrustBundle(waitCtx, timeout)
+		resultChan <- result{err: err, client: "agent2"}
 	}()
 
-	// Return when first client succeeds
+	var results []result
+	timeoutChan := time.After(timeout + 30*time.Second)
+
 	for i := 0; i < 2; i++ {
 		select {
-		case err := <-errChan:
-			if err == nil {
+		case res := <-resultChan:
+			results = append(results, res)
+			if res.err == nil {
+				dac.logger.Debug("successfully waited for trust bundle",
+					"client", res.client)
 				return nil
 			}
-			dac.logger.Debug("client failed to provide trust bundle", "error", err)
-		case <-ctx.Done():
+			dac.logger.Debug("client failed to provide trust bundle",
+				"client", res.client,
+				"error", res.err)
+		case <-timeoutChan:
+			dac.logger.Error("timeout waiting for trust bundle from clients",
+				"timeout", timeout)
 			return fmt.Errorf("timeout waiting for trust bundle")
+		case <-ctx.Done():
+			dac.logger.Debug("context cancelled while waiting for trust bundle")
+			return ctx.Err()
 		}
 	}
 
+	dac.logger.Error("no client could provide trust bundle",
+		"client_count", len(results))
 	return fmt.Errorf("no client could provide trust bundle")
 }
 
 // GetCACertificates returns CA certificates from first available client
 func (dac *DualAgentClient) GetCACertificates(ctx context.Context) ([]*x509.Certificate, error) {
-	// Try client1 first
-	certs, err := dac.client1.GetCACertificates(ctx)
-	if err == nil {
-		return certs, nil
+	type result struct {
+		certs  []*x509.Certificate
+		err    error
+		client string
 	}
 
-	// Fallback to client2
-	certs, err = dac.client2.GetCACertificates(ctx)
-	if err == nil {
-		return certs, nil
+	resultChan := make(chan result, 2)
+
+	fetchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	go func() {
+		opCtx, opCancel := context.WithTimeout(fetchCtx, 3*time.Second)
+		defer opCancel()
+
+		done := make(chan struct{})
+		var certs []*x509.Certificate
+		var err error
+
+		go func() {
+			certs, err = dac.client1.GetCACertificates(opCtx)
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			resultChan <- result{certs: certs, err: err, client: "agent1"}
+		case <-opCtx.Done():
+			resultChan <- result{err: fmt.Errorf("agent1 timeout: %w", opCtx.Err()), client: "agent1"}
+		}
+	}()
+
+	go func() {
+		opCtx, opCancel := context.WithTimeout(fetchCtx, 3*time.Second)
+		defer opCancel()
+
+		done := make(chan struct{})
+		var certs []*x509.Certificate
+		var err error
+
+		go func() {
+			certs, err = dac.client2.GetCACertificates(opCtx)
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			resultChan <- result{certs: certs, err: err, client: "agent2"}
+		case <-opCtx.Done():
+			resultChan <- result{err: fmt.Errorf("agent2 timeout: %w", opCtx.Err()), client: "agent2"}
+		}
+	}()
+
+	var results []result
+	timeout := time.After(5 * time.Second)
+
+	for i := 0; i < 2; i++ {
+		select {
+		case res := <-resultChan:
+			results = append(results, res)
+			if res.err == nil && res.certs != nil && len(res.certs) > 0 {
+				dac.logger.Debug("successfully got CA certificates",
+					"client", res.client,
+					"cert_count", len(res.certs))
+				return res.certs, nil
+			}
+			dac.logger.Debug("client failed to provide CA certificates",
+				"client", res.client,
+				"error", res.err)
+		case <-timeout:
+			dac.logger.Error("timeout waiting for CA certificates from clients")
+			break
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	// Check if any client returned certificates
+	for _, res := range results {
+		if res.certs != nil && len(res.certs) > 0 {
+			dac.logger.Warn("returning CA certificates despite errors",
+				"client", res.client,
+				"cert_count", len(res.certs))
+			return res.certs, nil
+		}
 	}
 
 	return nil, fmt.Errorf("failed to get CA certificates from any client")
@@ -179,23 +312,99 @@ func (dac *DualAgentClient) GetCACertificates(ctx context.Context) ([]*x509.Cert
 
 // GetCertificateForIdentity returns certificate from first available client
 func (dac *DualAgentClient) GetCertificateForIdentity(spiffeID string) (*tls.Certificate, error) {
-	// Try client1 first
-	cert, err := dac.client1.GetCertificateForIdentity(spiffeID)
-	if err == nil {
-		return cert, nil
+	type result struct {
+		cert   *tls.Certificate
+		err    error
+		client string
 	}
 
-	dac.logger.Debug("client1 failed to provide certificate, trying client2",
-		"spiffe_id", spiffeID,
-		"error", err)
+	resultChan := make(chan result, 2)
 
-	// Fallback to client2
-	cert, err = dac.client2.GetCertificateForIdentity(spiffeID)
-	if err == nil {
-		return cert, nil
+	// Create a context with timeout for each operation
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Try both clients concurrently with timeout
+	go func() {
+		opCtx, opCancel := context.WithTimeout(ctx, 3*time.Second)
+		defer opCancel()
+
+		done := make(chan struct{})
+		var cert *tls.Certificate
+		var err error
+
+		go func() {
+			cert, err = dac.client1.GetCertificateForIdentity(spiffeID)
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			resultChan <- result{cert: cert, err: err, client: "agent1"}
+		case <-opCtx.Done():
+			resultChan <- result{err: fmt.Errorf("agent1 timeout: %w", opCtx.Err()), client: "agent1"}
+		}
+	}()
+
+	go func() {
+		opCtx, opCancel := context.WithTimeout(ctx, 3*time.Second)
+		defer opCancel()
+
+		done := make(chan struct{})
+		var cert *tls.Certificate
+		var err error
+
+		go func() {
+			cert, err = dac.client2.GetCertificateForIdentity(spiffeID)
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			resultChan <- result{cert: cert, err: err, client: "agent2"}
+		case <-opCtx.Done():
+			resultChan <- result{err: fmt.Errorf("agent2 timeout: %w", opCtx.Err()), client: "agent2"}
+		}
+	}()
+
+	var results []result
+	timeout := time.After(6 * time.Second)
+
+	for i := 0; i < 2; i++ {
+		select {
+		case res := <-resultChan:
+			results = append(results, res)
+			// Return first successful response
+			if res.err == nil && res.cert != nil {
+				dac.logger.Debug("successfully got certificate",
+					"client", res.client,
+					"spiffe_id", spiffeID)
+				return res.cert, nil
+			}
+			dac.logger.Debug("client failed to provide certificate",
+				"client", res.client,
+				"spiffe_id", spiffeID,
+				"error", res.err)
+		case <-timeout:
+			dac.logger.Error("timeout waiting for certificate from clients",
+				"spiffe_id", spiffeID)
+			break
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 
-	return nil, fmt.Errorf("failed to get certificate from any client")
+	// Check if any client returned a certificate despite errors
+	for _, res := range results {
+		if res.cert != nil {
+			dac.logger.Warn("returning certificate despite errors",
+				"client", res.client,
+				"spiffe_id", spiffeID)
+			return res.cert, nil
+		}
+	}
+
+	return nil, fmt.Errorf("failed to get certificate from any client for %s", spiffeID)
 }
 
 // FetchJWTSVID fetches JWT SVID from both clients concurrently
@@ -208,21 +417,27 @@ func (dac *DualAgentClient) FetchJWTSVID(ctx context.Context, spiffeID string, a
 
 	resultChan := make(chan result, 2)
 
-	// Fetch from both clients concurrently
+	fetchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
 	go func() {
-		token, err := dac.client1.FetchJWTSVID(ctx, spiffeID, audiences)
+		token, err := dac.client1.FetchJWTSVID(fetchCtx, spiffeID, audiences)
 		resultChan <- result{token: token, err: err, client: "agent1"}
 	}()
 
 	go func() {
-		token, err := dac.client2.FetchJWTSVID(ctx, spiffeID, audiences)
+		token, err := dac.client2.FetchJWTSVID(fetchCtx, spiffeID, audiences)
 		resultChan <- result{token: token, err: err, client: "agent2"}
 	}()
 
-	// Return first successful response
+	var results []result
+	timeout := time.After(15 * time.Second)
+
 	for i := 0; i < 2; i++ {
 		select {
 		case res := <-resultChan:
+			results = append(results, res)
+			// Return first successful response
 			if res.err == nil && res.token != "" {
 				dac.logger.Debug("successfully fetched JWT SVID",
 					"client", res.client,
@@ -233,10 +448,21 @@ func (dac *DualAgentClient) FetchJWTSVID(ctx context.Context, spiffeID string, a
 				"client", res.client,
 				"spiffe_id", spiffeID,
 				"error", res.err)
-		case <-time.After(30 * time.Second):
-			return "", fmt.Errorf("timeout waiting for JWT SVID")
+		case <-timeout:
+			dac.logger.Error("timeout waiting for JWT SVID from clients")
+			break
 		case <-ctx.Done():
 			return "", ctx.Err()
+		}
+	}
+
+	// Check if any client returned a token
+	for _, res := range results {
+		if res.token != "" {
+			dac.logger.Warn("returning token despite errors",
+				"client", res.client,
+				"spiffe_id", spiffeID)
+			return res.token, nil
 		}
 	}
 
@@ -245,14 +471,84 @@ func (dac *DualAgentClient) FetchJWTSVID(ctx context.Context, spiffeID string, a
 
 // GetTrustBundle returns trust bundle from first available client
 func (dac *DualAgentClient) GetTrustBundle() (*x509.CertPool, error) {
-	bundle, err := dac.client1.GetTrustBundle()
-	if err == nil {
-		return bundle, nil
+	type result struct {
+		bundle *x509.CertPool
+		err    error
+		client string
 	}
 
-	bundle, err = dac.client2.GetTrustBundle()
-	if err == nil {
-		return bundle, nil
+	resultChan := make(chan result, 2)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	go func() {
+		done := make(chan struct{})
+		var bundle *x509.CertPool
+		var err error
+
+		go func() {
+			bundle, err = dac.client1.GetTrustBundle()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			resultChan <- result{bundle: bundle, err: err, client: "agent1"}
+		case <-ctx.Done():
+			resultChan <- result{err: fmt.Errorf("agent1 timeout: %w", ctx.Err()), client: "agent1"}
+		}
+	}()
+
+	go func() {
+		done := make(chan struct{})
+		var bundle *x509.CertPool
+		var err error
+
+		go func() {
+			bundle, err = dac.client2.GetTrustBundle()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			resultChan <- result{bundle: bundle, err: err, client: "agent2"}
+		case <-ctx.Done():
+			resultChan <- result{err: fmt.Errorf("agent2 timeout: %w", ctx.Err()), client: "agent2"}
+		}
+	}()
+
+	var results []result
+	timeout := time.After(5 * time.Second)
+
+	for i := 0; i < 2; i++ {
+		select {
+		case res := <-resultChan:
+			results = append(results, res)
+			// Return first successful response
+			if res.err == nil && res.bundle != nil {
+				dac.logger.Debug("successfully got trust bundle",
+					"client", res.client)
+				return res.bundle, nil
+			}
+			dac.logger.Debug("client failed to provide trust bundle",
+				"client", res.client,
+				"error", res.err)
+		case <-timeout:
+			dac.logger.Error("timeout waiting for trust bundle from clients")
+			break
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	// Check if any client returned a bundle
+	for _, res := range results {
+		if res.bundle != nil {
+			dac.logger.Warn("returning trust bundle despite errors",
+				"client", res.client)
+			return res.bundle, nil
+		}
 	}
 
 	return nil, fmt.Errorf("failed to get trust bundle from any client")
@@ -282,7 +578,6 @@ func (dac *DualAgentClient) Stop() error {
 		dac.cancelFunc()
 	}
 
-	// Stop both clients
 	var errors []error
 
 	if err := dac.client1.Stop(); err != nil {

@@ -36,7 +36,7 @@ var (
 			Name: "spire_csi_spire_connection_status",
 			Help: "SPIRE connection status (1 = connected, 0 = disconnected)",
 		},
-		[]string{"namespace", "service_account", "pod_uid"},
+		[]string{"agent", "namespace", "service_account", "pod_uid"},
 	)
 
 	SpireConnectionAttempts = promauto.NewCounterVec(
@@ -44,7 +44,7 @@ var (
 			Name: "spire_csi_spire_connection_attempts_total",
 			Help: "Total number of SPIRE connection attempts",
 		},
-		[]string{"namespace", "service_account", "pod_uid"},
+		[]string{"agent", "namespace", "service_account", "pod_uid"},
 	)
 
 	SpireSVIDsReceived = promauto.NewCounterVec(
@@ -52,7 +52,7 @@ var (
 			Name: "spire_csi_svids_received_total",
 			Help: "Total number of SVIDs received from SPIRE",
 		},
-		[]string{"type", "namespace", "service_account", "pod_uid"},
+		[]string{"agent", "type", "namespace", "service_account", "pod_uid"},
 	)
 
 	SpireBundleUpdates = promauto.NewCounterVec(
@@ -60,7 +60,7 @@ var (
 			Name: "spire_csi_bundle_updates_total",
 			Help: "Total number of trust bundle updates received",
 		},
-		[]string{"namespace", "service_account", "pod_uid"},
+		[]string{"agent", "namespace", "service_account", "pod_uid"},
 	)
 
 	JWTCacheHits = promauto.NewCounterVec(
@@ -68,7 +68,7 @@ var (
 			Name: "spire_csi_jwt_cache_hits_total",
 			Help: "Total number of JWT cache hits",
 		},
-		[]string{"namespace", "service_account", "pod_uid"},
+		[]string{"agent", "namespace", "service_account", "pod_uid"},
 	)
 
 	JWTCacheMisses = promauto.NewCounterVec(
@@ -76,7 +76,7 @@ var (
 			Name: "spire_csi_jwt_cache_misses_total",
 			Help: "Total number of JWT cache misses",
 		},
-		[]string{"namespace", "service_account", "pod_uid"},
+		[]string{"agent", "namespace", "service_account", "pod_uid"},
 	)
 
 	JWTCacheSize = promauto.NewGaugeVec(
@@ -84,7 +84,7 @@ var (
 			Name: "spire_csi_jwt_cache_size",
 			Help: "Current size of JWT cache",
 		},
-		[]string{"namespace", "service_account", "pod_uid"},
+		[]string{"agent", "namespace", "service_account", "pod_uid"},
 	)
 
 	SVIDCacheSize = promauto.NewGaugeVec(
@@ -92,7 +92,7 @@ var (
 			Name: "spire_csi_svid_cache_size",
 			Help: "Current size of SVID cache",
 		},
-		[]string{"namespace", "service_account", "pod_uid"},
+		[]string{"agent", "namespace", "service_account", "pod_uid"},
 	)
 
 	HealthCheckStatus = promauto.NewGauge(
@@ -151,37 +151,37 @@ func RecordObjectProcessed(objectType, status string, ctx PodContext) {
 	ObjectsProcessedTotal.WithLabelValues(objectType, status, ctx.Namespace, ctx.ServiceAccount, ctx.PodUID).Inc()
 }
 
-func UpdateSpireConnectionStatus(connected bool, ctx PodContext) {
+func UpdateSpireConnectionStatus(connected bool, agent, namespace, serviceAccount, podUID string) {
 	value := 0.0
 	if connected {
 		value = 1.0
 	}
-	SpireConnectionStatus.WithLabelValues(ctx.Namespace, ctx.ServiceAccount, ctx.PodUID).Set(value)
+	SpireConnectionStatus.WithLabelValues(agent, namespace, serviceAccount, podUID).Set(value)
 }
 
-func RecordSpireConnectionAttempt(ctx PodContext) {
-	SpireConnectionAttempts.WithLabelValues(ctx.Namespace, ctx.ServiceAccount, ctx.PodUID).Inc()
+func RecordSpireConnectionAttempt(agent, namespace, serviceAccount, podUID string) {
+	SpireConnectionAttempts.WithLabelValues(agent, namespace, serviceAccount, podUID).Inc()
 }
 
-func RecordSpireSVIDReceived(svidType string, ctx PodContext) {
-	SpireSVIDsReceived.WithLabelValues(svidType, ctx.Namespace, ctx.ServiceAccount, ctx.PodUID).Inc()
+func RecordSpireSVIDReceived(agent, svidType, namespace, serviceAccount, podUID string) {
+	SpireSVIDsReceived.WithLabelValues(agent, svidType, namespace, serviceAccount, podUID).Inc()
 }
 
-func RecordSpireBundleUpdate(ctx PodContext) {
-	SpireBundleUpdates.WithLabelValues(ctx.Namespace, ctx.ServiceAccount, ctx.PodUID).Inc()
+func RecordSpireBundleUpdate(agent, namespace, serviceAccount, podUID string) {
+	SpireBundleUpdates.WithLabelValues(agent, namespace, serviceAccount, podUID).Inc()
 }
 
-func RecordJWTCacheHit(ctx PodContext) {
-	JWTCacheHits.WithLabelValues(ctx.Namespace, ctx.ServiceAccount, ctx.PodUID).Inc()
+func RecordJWTCacheHit(agent, namespace, serviceAccount, podUID string) {
+	JWTCacheHits.WithLabelValues(agent, namespace, serviceAccount, podUID).Inc()
 }
 
-func RecordJWTCacheMiss(ctx PodContext) {
-	JWTCacheMisses.WithLabelValues(ctx.Namespace, ctx.ServiceAccount, ctx.PodUID).Inc()
+func RecordJWTCacheMiss(agent, namespace, serviceAccount, podUID string) {
+	JWTCacheMisses.WithLabelValues(agent, namespace, serviceAccount, podUID).Inc()
 }
 
-func UpdateCacheSizes(jwtCacheSize, svidCacheSize int, ctx PodContext) {
-	JWTCacheSize.WithLabelValues(ctx.Namespace, ctx.ServiceAccount, ctx.PodUID).Set(float64(jwtCacheSize))
-	SVIDCacheSize.WithLabelValues(ctx.Namespace, ctx.ServiceAccount, ctx.PodUID).Set(float64(svidCacheSize))
+func UpdateCacheSizes(agent, namespace, serviceAccount, podUID string, jwtCacheSize, svidCacheSize int) {
+	JWTCacheSize.WithLabelValues(agent, namespace, serviceAccount, podUID).Set(float64(jwtCacheSize))
+	SVIDCacheSize.WithLabelValues(agent, namespace, serviceAccount, podUID).Set(float64(svidCacheSize))
 }
 
 // Client pool metrics
@@ -199,4 +199,52 @@ func RecordProviderPoolMiss(trustDomain, namespace, serviceAccount string) {
 
 func RecordProviderEviction(reason string) {
 	ProviderPoolEvictions.WithLabelValues(reason).Inc()
+}
+
+func UpdateSpireConnectionStatusCtx(connected bool, ctx PodContext) {
+	UpdateSpireConnectionStatus(connected, "agent", ctx.Namespace, ctx.ServiceAccount, ctx.PodUID)
+}
+
+func RecordSpireConnectionAttemptCtx(ctx PodContext) {
+	RecordSpireConnectionAttempt("agent", ctx.Namespace, ctx.ServiceAccount, ctx.PodUID)
+}
+
+func RecordSpireSVIDReceivedCtx(svidType string, ctx PodContext) {
+	RecordSpireSVIDReceived("agent", svidType, ctx.Namespace, ctx.ServiceAccount, ctx.PodUID)
+}
+
+func RecordSpireBundleUpdateCtx(ctx PodContext) {
+	RecordSpireBundleUpdate("agent", ctx.Namespace, ctx.ServiceAccount, ctx.PodUID)
+}
+
+func RecordJWTCacheHitCtx(ctx PodContext) {
+	RecordJWTCacheHit("agent", ctx.Namespace, ctx.ServiceAccount, ctx.PodUID)
+}
+
+func RecordJWTCacheMissCtx(ctx PodContext) {
+	RecordJWTCacheMiss("agent", ctx.Namespace, ctx.ServiceAccount, ctx.PodUID)
+}
+
+func UpdateCacheSizesCtx(jwtCacheSize, svidCacheSize int, ctx PodContext) {
+	UpdateCacheSizes("agent", ctx.Namespace, ctx.ServiceAccount, ctx.PodUID, jwtCacheSize, svidCacheSize)
+}
+
+func RecordMountRequestCtx(status string, duration float64, ctx PodContext) {
+	RecordMountRequest(status, duration, ctx)
+}
+
+func RecordObjectProcessedCtx(objectType, status string, ctx PodContext) {
+	RecordObjectProcessed(objectType, status, ctx)
+}
+
+func RecordProviderPoolHitCtx(trustDomain, namespace, serviceAccount string) {
+	RecordProviderPoolHit(trustDomain, namespace, serviceAccount)
+}
+
+func RecordProviderPoolMissCtx(trustDomain, namespace, serviceAccount string) {
+	RecordProviderPoolMiss(trustDomain, namespace, serviceAccount)
+}
+
+func RecordProviderEvictionCtx(reason string) {
+	RecordProviderEviction(reason)
 }

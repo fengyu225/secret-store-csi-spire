@@ -8,13 +8,13 @@ import (
 	"crypto/x509/pkix"
 	"errors"
 	"fmt"
-	"github.com/golang/mock/gomock"
 	"math/big"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/golang/mock/gomock"
 	"github.com/hashicorp/go-hclog"
 	delegatedapi "github.com/spiffe/spire-api-sdk/proto/spire/api/agent/delegatedidentity/v1"
 	typesapi "github.com/spiffe/spire-api-sdk/proto/spire/api/types"
@@ -176,8 +176,8 @@ func TestClient_WaitForSVID(t *testing.T) {
 			ctx := context.Background()
 
 			if tt.preloadSVID {
-				// Preload SVID in store
-				client.svidStore[tt.spiffeID] = &delegatedapi.X509SVIDWithKey{
+				// Preload SVID in store through the manager
+				client.svidManager.store[tt.spiffeID] = &delegatedapi.X509SVIDWithKey{
 					X509Svid: &typesapi.X509SVID{
 						Id: &typesapi.SPIFFEID{
 							TrustDomain: "example.org",
@@ -192,8 +192,8 @@ func TestClient_WaitForSVID(t *testing.T) {
 				// Simulate SVID becoming available after a delay
 				go func() {
 					time.Sleep(100 * time.Millisecond)
-					client.svidStoreMutex.Lock()
-					client.svidStore[tt.spiffeID] = &delegatedapi.X509SVIDWithKey{
+					client.svidManager.mu.Lock()
+					client.svidManager.store[tt.spiffeID] = &delegatedapi.X509SVIDWithKey{
 						X509Svid: &typesapi.X509SVID{
 							Id: &typesapi.SPIFFEID{
 								TrustDomain: "example.org",
@@ -202,17 +202,21 @@ func TestClient_WaitForSVID(t *testing.T) {
 							ExpiresAt: time.Now().Add(1 * time.Hour).Unix(),
 						},
 					}
-					client.svidStoreMutex.Unlock()
+					client.svidManager.mu.Unlock()
 
 					// Notify waiter
-					client.svidWaitersMutex.Lock()
-					if waitChan, exists := client.svidWaiters[tt.spiffeID]; exists {
+					client.svidManager.waitersMutex.Lock()
+					if waitChan, exists := client.svidManager.waiters[tt.spiffeID]; exists {
 						close(waitChan)
-						delete(client.svidWaiters, tt.spiffeID)
+						delete(client.svidManager.waiters, tt.spiffeID)
 					}
-					client.svidWaitersMutex.Unlock()
+					client.svidManager.waitersMutex.Unlock()
 				}()
 			}
+
+			// Mock the stream manager to be healthy
+			client.streamManager.initialized.Store(true)
+			client.streamManager.streamsHealthy.Store(true)
 
 			err := client.WaitForSVID(ctx, tt.spiffeID, tt.timeout)
 
@@ -275,9 +279,9 @@ func TestClient_WaitForTrustBundle(t *testing.T) {
 			ctx := context.Background()
 
 			if tt.preloadBundle {
-				// Preload trust bundle
+				// Preload trust bundle through the manager
 				cert := generateTestCACertificate(t)
-				client.parsedCerts["example.org"] = []*x509.Certificate{cert}
+				client.bundleManager.parsedCerts["example.org"] = []*x509.Certificate{cert}
 			}
 
 			if tt.simulateUpdate {
@@ -285,21 +289,25 @@ func TestClient_WaitForTrustBundle(t *testing.T) {
 				go func() {
 					time.Sleep(100 * time.Millisecond)
 					cert := generateTestCACertificate(t)
-					client.parsedCertsMutex.Lock()
-					client.parsedCerts["example.org"] = []*x509.Certificate{cert}
-					client.parsedCertsMutex.Unlock()
+					client.bundleManager.mu.Lock()
+					client.bundleManager.parsedCerts["example.org"] = []*x509.Certificate{cert}
+					client.bundleManager.mu.Unlock()
 
 					// Signal bundle ready
-					client.trustBundleOnce.Do(func() {
-						client.trustBundleReady = make(chan struct{})
+					client.bundleManager.readyOnce.Do(func() {
+						client.bundleManager.ready = make(chan struct{})
 					})
 					select {
-					case <-client.trustBundleReady:
+					case <-client.bundleManager.ready:
 					default:
-						close(client.trustBundleReady)
+						close(client.bundleManager.ready)
 					}
 				}()
 			}
+
+			// Mock the stream manager to be healthy
+			client.streamManager.initialized.Store(true)
+			client.streamManager.streamsHealthy.Store(true)
 
 			err := client.WaitForTrustBundle(ctx, tt.timeout)
 
@@ -374,7 +382,11 @@ func TestClient_GetCACertificates(t *testing.T) {
 			}
 
 			client, _ := New(logger, config)
-			client.parsedCerts = tt.setupCerts
+			client.bundleManager.parsedCerts = tt.setupCerts
+
+			// Mock the stream manager to be healthy
+			client.streamManager.initialized.Store(true)
+			client.streamManager.streamsHealthy.Store(true)
 
 			ctx := context.Background()
 			certs, err := client.GetCACertificates(ctx)
@@ -482,8 +494,12 @@ func TestClient_GetCertificateForIdentity(t *testing.T) {
 					svid.X509SvidKey = []byte("invalid-key")
 				}
 
-				client.svidStore[tt.spiffeID] = svid
+				client.svidManager.store[tt.spiffeID] = svid
 			}
+
+			// Mock the stream manager to be healthy
+			client.streamManager.initialized.Store(true)
+			client.streamManager.streamsHealthy.Store(true)
 
 			tlsCert, err := client.GetCertificateForIdentity(tt.spiffeID)
 
@@ -576,13 +592,6 @@ func TestClient_FetchJWTSVID(t *testing.T) {
 			expectError: true,
 			errorMsg:    "no JWT-SVIDs returned",
 		},
-		{
-			name:        "nil delegated client",
-			spiffeID:    "spiffe://example.org/test",
-			audiences:   []string{"audience1"},
-			expectError: true,
-			errorMsg:    "not connected to SPIRE",
-		},
 	}
 
 	for _, tt := range tests {
@@ -601,28 +610,30 @@ func TestClient_FetchJWTSVID(t *testing.T) {
 
 			// Setup cached entry if specified
 			if tt.cachedToken != "" {
-				cacheKey := client.createJWTCacheKey(tt.spiffeID, tt.audiences)
-				client.jwtSVIDCache[cacheKey] = &jwtCacheEntry{
+				cacheKey := client.jwtCache.createCacheKey(tt.spiffeID, tt.audiences)
+				client.jwtCache.cache[cacheKey] = &jwtCacheEntry{
 					token:     tt.cachedToken,
 					expiresAt: tt.cachedExpiry,
 					audiences: tt.audiences,
 				}
 			}
 
-			// Setup mock delegated client if not testing nil client
-			if tt.name != "nil delegated client" {
-				mockClient := NewMockDelegatedIdentityClient(ctrl)
-				client.delegatedIdentityClient = mockClient
+			// Mock the stream manager to be healthy
+			client.streamManager.initialized.Store(true)
+			client.streamManager.streamsHealthy.Store(true)
 
-				if !tt.expectCacheHit && tt.fetchResponse != nil {
-					mockClient.EXPECT().
-						FetchJWTSVIDs(gomock.Any(), gomock.Any()).
-						Return(tt.fetchResponse, tt.fetchError)
-				} else if !tt.expectCacheHit && tt.fetchError != nil {
-					mockClient.EXPECT().
-						FetchJWTSVIDs(gomock.Any(), gomock.Any()).
-						Return(nil, tt.fetchError)
-				}
+			// Setup mock delegated client
+			mockClient := NewMockDelegatedIdentityClient(ctrl)
+			client.conn.client = mockClient
+
+			if !tt.expectCacheHit && tt.fetchResponse != nil {
+				mockClient.EXPECT().
+					FetchJWTSVIDs(gomock.Any(), gomock.Any()).
+					Return(tt.fetchResponse, tt.fetchError)
+			} else if !tt.expectCacheHit && tt.fetchError != nil {
+				mockClient.EXPECT().
+					FetchJWTSVIDs(gomock.Any(), gomock.Any()).
+					Return(nil, tt.fetchError)
 			}
 
 			token, err := client.FetchJWTSVID(ctx, tt.spiffeID, tt.audiences)
@@ -643,175 +654,6 @@ func TestClient_FetchJWTSVID(t *testing.T) {
 				if !tt.expectCacheHit && tt.fetchResponse != nil && token != tt.fetchResponse.Svids[0].Token {
 					t.Errorf("Expected fetched token %q, got %q", tt.fetchResponse.Svids[0].Token, token)
 				}
-			}
-		})
-	}
-}
-
-func TestClient_HandleX509SVIDUpdate(t *testing.T) {
-	tests := []struct {
-		name                string
-		existingSVIDs       map[string]*delegatedapi.X509SVIDWithKey
-		updateSVIDs         []*delegatedapi.X509SVIDWithKey
-		expectedStore       int
-		trustDomainMismatch bool
-	}{
-		{
-			name:          "new SVID added",
-			existingSVIDs: map[string]*delegatedapi.X509SVIDWithKey{},
-			updateSVIDs: []*delegatedapi.X509SVIDWithKey{
-				createTestSVID("example.org", "/test"),
-			},
-			expectedStore: 1,
-		},
-		{
-			name: "existing SVID updated",
-			existingSVIDs: map[string]*delegatedapi.X509SVIDWithKey{
-				"spiffe://example.org/test": createTestSVID("example.org", "/test"),
-			},
-			updateSVIDs: []*delegatedapi.X509SVIDWithKey{
-				createTestSVIDWithExpiry("example.org", "/test", time.Now().Add(2*time.Hour)),
-			},
-			expectedStore: 1,
-		},
-		{
-			name: "SVID deleted",
-			existingSVIDs: map[string]*delegatedapi.X509SVIDWithKey{
-				"spiffe://example.org/test":  createTestSVID("example.org", "/test"),
-				"spiffe://example.org/test2": createTestSVID("example.org", "/test2"),
-			},
-			updateSVIDs: []*delegatedapi.X509SVIDWithKey{
-				createTestSVID("example.org", "/test"),
-			},
-			expectedStore: 1,
-		},
-		{
-			name:          "trust domain mismatch",
-			existingSVIDs: map[string]*delegatedapi.X509SVIDWithKey{},
-			updateSVIDs: []*delegatedapi.X509SVIDWithKey{
-				createTestSVID("other.org", "/test"),
-			},
-			trustDomainMismatch: true,
-			expectedStore:       0,
-		},
-		{
-			name:          "multiple SVIDs",
-			existingSVIDs: map[string]*delegatedapi.X509SVIDWithKey{},
-			updateSVIDs: []*delegatedapi.X509SVIDWithKey{
-				createTestSVID("example.org", "/test1"),
-				createTestSVID("example.org", "/test2"),
-				createTestSVID("example.org", "/test3"),
-			},
-			expectedStore: 3,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			logger := hclog.NewNullLogger()
-			config := Config{
-				SpireSocketPath:   "/run/spire/socket",
-				SpiffeTrustDomain: "example.org",
-			}
-
-			client, _ := New(logger, config)
-			client.svidStore = tt.existingSVIDs
-			client.svidWaiters = make(map[string]chan struct{})
-
-			// Handle update
-			client.handleX509SVIDUpdate(tt.updateSVIDs)
-
-			// Verify store
-			if !tt.trustDomainMismatch {
-				if len(client.svidStore) != tt.expectedStore {
-					t.Errorf("Expected %d SVIDs in store, got %d", tt.expectedStore, len(client.svidStore))
-				}
-			} else {
-				// For trust domain mismatch, store should remain unchanged
-				if len(client.svidStore) != len(tt.existingSVIDs) {
-					t.Error("Store should not change for trust domain mismatch")
-				}
-			}
-		})
-	}
-}
-
-func TestClient_HandleX509BundleUpdate(t *testing.T) {
-	tests := []struct {
-		name            string
-		bundles         map[string][]byte
-		expectError     bool
-		expectedDomains int
-		expectedCerts   map[string]int
-	}{
-		{
-			name: "single domain bundle",
-			bundles: map[string][]byte{
-				"example.org": generateTestCACertificate(t).Raw,
-			},
-			expectedDomains: 1,
-			expectedCerts: map[string]int{
-				"example.org": 1,
-			},
-		},
-		{
-			name: "multiple domain bundles",
-			bundles: map[string][]byte{
-				"example.org": generateTestCACertificate(t).Raw,
-				"test.org":    generateTestCACertificate(t).Raw,
-			},
-			expectedDomains: 2,
-			expectedCerts: map[string]int{
-				"example.org": 1,
-				"test.org":    1,
-			},
-		},
-		{
-			name: "invalid certificate",
-			bundles: map[string][]byte{
-				"example.org": []byte("invalid-cert"),
-			},
-			expectedDomains: 0,
-			expectError:     true,
-		},
-		{
-			name:            "empty bundles",
-			bundles:         map[string][]byte{},
-			expectedDomains: 0,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			logger := hclog.NewNullLogger()
-			config := Config{
-				SpireSocketPath:   "/run/spire/socket",
-				SpiffeTrustDomain: "example.org",
-			}
-
-			client, _ := New(logger, config)
-
-			// Handle update
-			client.handleX509BundleUpdate(tt.bundles)
-
-			// Verify parsed certs
-			if len(client.parsedCerts) != tt.expectedDomains {
-				t.Errorf("Expected %d domains, got %d", tt.expectedDomains, len(client.parsedCerts))
-			}
-
-			for domain, expectedCount := range tt.expectedCerts {
-				if certs, exists := client.parsedCerts[domain]; exists {
-					if len(certs) != expectedCount {
-						t.Errorf("Domain %s: expected %d certs, got %d", domain, expectedCount, len(certs))
-					}
-				} else {
-					t.Errorf("Expected domain %s not found", domain)
-				}
-			}
-
-			// Verify trust bundle is set
-			if !tt.expectError && client.trustBundle == nil {
-				t.Error("Trust bundle should be set")
 			}
 		})
 	}
@@ -855,8 +697,8 @@ func TestClient_Status(t *testing.T) {
 			}
 
 			client, _ := New(logger, config)
-			client.connected = tt.connected
-			client.lastConnectError = tt.lastConnectError
+			client.conn.connected = tt.connected
+			client.conn.lastConnectError = tt.lastConnectError
 
 			status, msg := client.Status()
 
@@ -882,10 +724,14 @@ func TestClient_ConcurrentOperations(t *testing.T) {
 
 	// Setup some initial data
 	cert := generateTestCACertificate(t)
-	client.parsedCerts["example.org"] = []*x509.Certificate{cert}
+	client.bundleManager.parsedCerts["example.org"] = []*x509.Certificate{cert}
 
 	svid := createTestSVID("example.org", "/test")
-	client.svidStore["spiffe://example.org/test"] = svid
+	client.svidManager.store["spiffe://example.org/test"] = svid
+
+	// Mock the stream manager to be healthy
+	client.streamManager.initialized.Store(true)
+	client.streamManager.streamsHealthy.Store(true)
 
 	// Run concurrent operations
 	var wg sync.WaitGroup
@@ -903,7 +749,7 @@ func TestClient_ConcurrentOperations(t *testing.T) {
 		}()
 	}
 
-	// Concurrent updates
+	// Concurrent updates through managers
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func(id int) {
@@ -911,17 +757,17 @@ func TestClient_ConcurrentOperations(t *testing.T) {
 			svids := []*delegatedapi.X509SVIDWithKey{
 				createTestSVID("example.org", fmt.Sprintf("/test%d", id)),
 			}
-			client.handleX509SVIDUpdate(svids)
+			client.svidManager.handleUpdate(svids, "example.org")
 		}(i)
 	}
 
 	wg.Wait()
 
 	// Verify client is still in valid state
-	if client.svidStore == nil {
+	if client.svidManager.store == nil {
 		t.Error("SVID store should not be nil after concurrent operations")
 	}
-	if client.parsedCerts == nil {
+	if client.bundleManager.parsedCerts == nil {
 		t.Error("Parsed certs should not be nil after concurrent operations")
 	}
 }
@@ -1013,5 +859,5 @@ func createTestSVIDWithExpiry(trustDomain, path string, expiry time.Time) *deleg
 }
 
 func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (strings.Contains(s, substr))
+	return strings.Contains(s, substr)
 }

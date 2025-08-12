@@ -1,4 +1,4 @@
-VERSION ?= v0.0.3
+VERSION ?= v0.0.4
 REGISTRY ?= fengyu225
 NAME ?= secrets-store-csi-provider-spire
 IMAGE_TAG ?= $(VERSION)
@@ -8,10 +8,6 @@ PLATFORMS ?= linux/amd64
 build:
 	@echo "Building binary..."
 	go build $(LDFLAGS) -o bin/spire-csi-provider cmd/spire-csi-provider/main.go
-
-test:
-	@echo "Running tests..."
-	go test -v ./...
 
 docker-build:
 	@echo "Building docker image $(IMAGE)..."
@@ -37,7 +33,7 @@ mocks:
 	@mkdir -p internal/mocks
 	@mockgen -source=internal/client/interface.go -destination=internal/client/mock_spire_client.go -package=client SpireClient
 	@mockgen -source=internal/client/pool_interface.go -destination=internal/client/mock_client_pool.go -package=client ClientPoolInterface
-	@mockgen -destination=internal/client/mock_delegated_identity.go -package=client github.com/spiffe/spire-api-sdk/proto/spire/api/agent/delegatedidentity/v1 DelegatedIdentityClient
+	@mockgen -destination=internal/client/mock_delegated_identity.go -package=client github.com/spiffe/spire-api-sdk/proto/spire/api/agent/delegatedidentity/v1 DelegatedIdentityClient,DelegatedIdentity_SubscribeToX509SVIDsClient,DelegatedIdentity_SubscribeToX509BundlesClient
 
 .PHONY: test
 test:

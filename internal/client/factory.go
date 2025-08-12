@@ -15,6 +15,9 @@ func NewSpireClient(logger hclog.Logger, config Config) (SpireClient, error) {
 	}
 
 	// Otherwise create regular client
+	if config.AgentID == "" {
+		config.AgentID = "agent"
+	}
 	logger.Info("creating single agent client",
 		"socket", config.SpireSocketPath)
 	return New(logger, config)
