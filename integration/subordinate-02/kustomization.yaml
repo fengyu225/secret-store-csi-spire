@@ -1,0 +1,24 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - crds/clusterfederatedtrustdomains.yaml
+  - crds/clusterspiffeids.yaml
+  - crds/clusterstaticentries.yaml
+  - crds/controllermanagerconfigs.yaml
+  - cluster-spiffe-ids.yaml
+  - configmaps/spire-root-agent.yaml
+  - configmaps/spire-bundle.yaml
+  - configmaps/spire-controller-manager-workload.yaml
+  - configmaps/spire-server.yaml
+  - deployments/spire-root-agent.yaml
+  - spire-server.yaml
+  - services/spire-server.yaml
+  - services/spire-server-nodeport.yaml
+  - rbac/spire-root-server-auth.yaml
+  - rbac/clusterrolebindings.yaml
+  - rbac/clusterroles.yaml
+  - rbac/rolebindings.yaml
+  - rbac/roles.yaml
+  - rbac/serviceaccounts.yaml

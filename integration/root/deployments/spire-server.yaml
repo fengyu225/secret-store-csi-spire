@@ -1,0 +1,145 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: spire-server
+  namespace: spire
+  labels:
+    app: spire-server
+spec:
+  replicas: 1
+  serviceName: spire-server
+  selector:
+    matchLabels:
+      app: spire-server
+  template:
+    metadata:
+      namespace: spire
+      labels:
+        app: spire-server
+    spec:
+      serviceAccountName: spire-server
+      containers:
+      - name: spire-server
+        image: ghcr.io/spiffe/spire-server:1.11.0
+        imagePullPolicy: Never
+        args: ["-config", "/run/spire/server/config/server.conf"]
+        ports:
+        - containerPort: 8081
+        volumeMounts:
+        - name: spire-config
+          mountPath: /run/spire/server/config
+          readOnly: true
+        - name: spire-data
+          mountPath: /run/spire/server/data
+        - name: spire-server-socket
+          mountPath: /tmp/spire-server/private
+        - name: kubeconfigs-child-01
+          mountPath: /kubeconfigs/child-01
+          readOnly: true
+          subPath: child-cluster
+        - name: kubeconfigs-child-02
+          mountPath: /kubeconfigs/child-02
+          readOnly: true
+          subPath: child-cluster
+        - name: spire-ca
+          mountPath: /opt/spire/ca
+          readOnly: true
+        livenessProbe:
+          httpGet:
+            path: /live
+            port: 8080
+          failureThreshold: 2
+          initialDelaySeconds: 15
+          periodSeconds: 60
+          timeoutSeconds: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      - name: spire-controller-manager
+        image: ghcr.io/spiffe/spire-controller-manager:0.6.0
+        imagePullPolicy: Never
+        args: ["--config=spire-controller-manager-config.yaml"]
+        ports:
+        - containerPort: 9443
+        volumeMounts:
+        - name: spire-controller-manager-config
+          mountPath: /spire-controller-manager-config.yaml
+          subPath: spire-controller-manager-config.yaml
+          readOnly: true
+        - name: spire-server-socket
+          mountPath: /spire-server
+          readOnly: true
+      - name: spire-controller-manager-child-01
+        image: ghcr.io/spiffe/spire-controller-manager:0.6.0
+        imagePullPolicy: Never
+        args: 
+        - "--kubeconfig=/kubeconfigs/child-01"
+        - "--config=controller-manager-config-child-01.yaml"
+        ports:
+        - containerPort: 8085
+        - containerPort: 8084
+        env:
+        - name: ENABLE_WEBHOOKS
+          value: "false"
+        volumeMounts:
+        - name: controller-manager-config-child-clusters
+          mountPath: /controller-manager-config-child-01.yaml
+          subPath: controller-manager-config-child-01.yaml
+          readOnly: true
+        - name: kubeconfigs-child-01
+          mountPath: /kubeconfigs/child-01
+          subPath: child-cluster
+          readOnly: true
+        - name: spire-server-socket
+          mountPath: /spire-server
+          readOnly: true
+      - name: spire-controller-manager-child-02
+        image: ghcr.io/spiffe/spire-controller-manager:0.6.0
+        imagePullPolicy: Never
+        args:
+        - "--kubeconfig=/kubeconfigs/child-02"
+        - "--config=controller-manager-config-child-02.yaml"
+        ports:
+        - containerPort: 8087
+        - containerPort: 8086
+        env:
+        - name: ENABLE_WEBHOOKS
+          value: "false"
+        volumeMounts:
+        - name: controller-manager-config-child-clusters
+          mountPath: /controller-manager-config-child-02.yaml
+          subPath: controller-manager-config-child-02.yaml
+          readOnly: true
+        - name: kubeconfigs-child-02
+          mountPath: /kubeconfigs/child-02
+          subPath: child-cluster
+          readOnly: true
+        - name: spire-server-socket
+          mountPath: /spire-server
+          readOnly: true
+      volumes:
+      - name: spire-config
+        configMap:
+          name: spire-server
+      - name: spire-data
+        emptyDir: {}
+      - name: spire-server-socket
+        emptyDir: {}
+      - name: spire-controller-manager-config
+        configMap:
+          name: spire-controller-manager-config
+      - name: controller-manager-config-child-clusters
+        configMap:
+          name: spire-controller-manager-child-clusters
+      - name: kubeconfigs-child-01
+        secret:
+          secretName: spire-server-kubeconfigs-child-01
+      - name: kubeconfigs-child-02
+        secret:
+          secretName: spire-server-kubeconfigs-child-02
+      - name: spire-ca
+        persistentVolumeClaim:
+          claimName: spire-ca-storage

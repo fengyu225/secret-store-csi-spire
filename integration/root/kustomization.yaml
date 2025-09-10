@@ -1,0 +1,40 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - crds/clusterfederatedtrustdomains.yaml
+  - crds/clusterspiffeids.yaml
+  - crds/clusterstaticentries.yaml
+  - crds/controllermanagerconfigs.yaml
+  - spiffe-csi-driver.yaml
+  - cluster-spiffe-ids.yaml
+  - configmaps/controller-manager.yaml
+  - configmaps/child-cluster-kubeconfigs.yaml
+  - configmaps/spire-agent.yaml
+  - configmaps/spire-bundle.yaml
+  - configmaps/spire-server.yaml
+  - deployments/spire-agent.yaml
+  - deployments/spire-server.yaml
+  - services/spire-server.yaml
+  - ingress.yaml
+  - webhooks/validating-webhook.yaml
+  - rbac/clusterroles.yaml
+  - rbac/clusterrolebindings.yaml
+  - rbac/roles.yaml
+  - rbac/rolebindings.yaml
+  - rbac/serviceaccounts.yaml
+  - upstreamca/pvc.yaml
+  - upstreamca/job.yaml
+
+secretGenerator:
+  - name: spire-database-secret
+    namespace: spire
+    envs:
+      - secrets.env
+
+generatorOptions:
+  disableNameSuffixHash: true
+
+patchesStrategicMerge:
+  - patches/spire-server-envsubst.yaml

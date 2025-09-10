@@ -1,0 +1,71 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spire-server
+  namespace: spire
+data:
+  server.conf: |
+    server {
+      bind_address = "0.0.0.0"
+      bind_port = "8081"
+      socket_path = "/tmp/spire-server/private/api.sock"
+      trust_domain = "example.org"
+      data_dir = "/run/spire/server/data"
+      log_level = "DEBUG"
+      default_x509_svid_ttl = "24h"
+      ca_ttl = "48h"
+      ca_subject = {
+        country = ["US"]
+        organization = ["SPIFFE"]
+        common_name = "example.org"
+      }
+      ca_key_type = "rsa-2048"
+    }
+
+    plugins {
+      DataStore "sql" {
+        plugin_data {
+          database_type = "sqlite3"
+          connection_string = "/run/spire/server/data/datastore.sqlite3"
+        }
+      }
+
+      NodeAttestor "k8s_psat" {
+        plugin_data {
+          clusters = {
+            "spire-subordinate-02" = {
+              service_account_allow_list = ["spire:spire-agent"]
+            }
+            "workload" = {
+              service_account_allow_list = ["spire:spire-agent-child-02"]
+              kube_config_file = "/run/spire/kubeconfig/workload-kubeconfig"
+            }
+          }
+        }
+      }
+
+      UpstreamAuthority "spire" {
+        plugin_data = {
+          server_address = "172.17.0.1"
+          server_port = 30443
+          workload_api_socket = "/run/spire/root-agent-sockets/socket"
+        }
+      }
+
+      KeyManager "memory" {
+      }
+
+      Notifier "k8sbundle" {
+        plugin_data {
+          namespace = "spire"
+        }
+      }
+    }
+
+    health_checks {
+      listener_enabled = true
+      bind_address = "0.0.0.0"
+      bind_port = "8080"
+      live_path = "/live"
+      ready_path = "/ready"
+    }

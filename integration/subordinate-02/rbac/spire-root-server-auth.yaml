@@ -1,0 +1,42 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spire-root-server
+  namespace: spire
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: spire-root-server-cluster-role
+rules:
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: spire-root-server-cluster-role-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: spire-root-server-cluster-role
+subjects:
+  - kind: ServiceAccount
+    name: spire-root-server
+    namespace: spire
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: spire-root-server-token
+  namespace: spire
+  annotations:
+    kubernetes.io/service-account.name: spire-root-server
+type: kubernetes.io/service-account-token

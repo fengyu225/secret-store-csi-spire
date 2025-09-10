@@ -1,0 +1,52 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: generate-ca-certs
+  namespace: spire
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      volumes:
+      - name: ca-storage
+        persistentVolumeClaim:
+          claimName: spire-ca-storage
+      containers:
+      - name: cert-generator
+        image: alpine/openssl:latest
+        imagePullPolicy: Never
+        command:
+        - /bin/sh
+        - -c
+        - |
+          # Create CA directory
+          mkdir -p /ca
+
+          # Check if CA already exists
+          if [ -f "/ca/ca.crt" ] && [ -f "/ca/ca.key" ]; then
+            echo "CA certificate already exists, skipping generation"
+            exit 0
+          fi
+
+          # Generate private key for CA (EC P-256 key for better performance)
+          openssl ecparam -genkey -name prime256v1 -noout -out /ca/ca.key
+
+          # Generate self-signed CA certificate (valid for 10 years)
+          openssl req -new -x509 -key ca/ca.key -sha256 \
+            -subj "/C=US/ST=CA/O=SPIRE/CN=SPIRE Root CA" \
+            -days 3650 -out ca/ca.crt
+
+          # Set proper permissions
+          chmod 777 /ca/ca.key
+          chmod 777 /ca/ca.crt
+
+          # Display certificate info
+          echo "Generated CA Certificate:"
+          openssl x509 -in /ca/ca.crt -text -noout
+
+          ls -la /ca/
+
+          echo "CA generation completed successfully"
+        volumeMounts:
+        - name: ca-storage
+          mountPath: /ca

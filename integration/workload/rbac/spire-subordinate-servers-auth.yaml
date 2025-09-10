@@ -1,0 +1,73 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spire-subordinate-01-server
+  namespace: spire
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spire-subordinate-02-server
+  namespace: spire
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: spire-subordinate-server-cluster-role
+rules:
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create", "get"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: spire-subordinate-01-server-cluster-role-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: spire-subordinate-server-cluster-role
+subjects:
+  - kind: ServiceAccount
+    name: spire-subordinate-01-server
+    namespace: spire
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: spire-subordinate-02-server-cluster-role-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: spire-subordinate-server-cluster-role
+subjects:
+  - kind: ServiceAccount
+    name: spire-subordinate-02-server
+    namespace: spire
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: spire-subordinate-01-server-token
+  namespace: spire
+  annotations:
+    kubernetes.io/service-account.name: spire-subordinate-01-server
+type: kubernetes.io/service-account-token
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: spire-subordinate-02-server-token
+  namespace: spire
+  annotations:
+    kubernetes.io/service-account.name: spire-subordinate-02-server
+type: kubernetes.io/service-account-token

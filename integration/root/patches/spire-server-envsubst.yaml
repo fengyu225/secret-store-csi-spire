@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: spire-server
+  namespace: spire
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: config-init
+          image: bhgedigital/envsubst:latest
+          imagePullPolicy: Never
+          command:
+            - /bin/sh
+            - -c
+            - |
+              envsubst < /config-template/server.conf.template > /config-output/server.conf
+              echo "Config file generated:"
+              cat /config-output/server.conf
+          envFrom:
+            - secretRef:
+                name: spire-database-secret
+          volumeMounts:
+            - name: spire-config-template
+              mountPath: /config-template
+            - name: spire-config-generated
+              mountPath: /config-output
+      containers:
+        - name: spire-server
+          envFrom:
+            - secretRef:
+                name: spire-database-secret
+          volumeMounts:
+            - name: spire-config-generated
+              mountPath: /run/spire/server/config
+      volumes:
+        - name: spire-config-template
+          configMap:
+            name: spire-server-template
+        - name: spire-config-generated
+          emptyDir: {}

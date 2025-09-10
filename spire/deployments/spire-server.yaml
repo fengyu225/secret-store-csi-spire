@@ -53,7 +53,6 @@ spec:
             periodSeconds: 5
         - name: spire-controller-manager
           image: ghcr.io/spiffe/spire-controller-manager:0.6.0
-#          image: docker.io/fengyu225/spire-controller-manager:latest
           imagePullPolicy: Always
           args: ["--config=spire-controller-manager-config.yaml"]
           ports:

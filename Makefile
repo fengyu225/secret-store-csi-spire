@@ -1,5 +1,4 @@
 VERSION ?= v0.0.4
-REGISTRY ?= fengyu225
 NAME ?= secrets-store-csi-provider-spire
 IMAGE_TAG ?= $(VERSION)
 PLATFORMS ?= linux/amd64
@@ -11,11 +10,11 @@ build:
 
 docker-build:
 	@echo "Building docker image $(IMAGE)..."
-	docker build --platform linux/amd64 -t $(REGISTRY)/$(NAME):$(IMAGE_TAG) -f Dockerfile .
+	docker build --platform linux/amd64 -t $(NAME):$(IMAGE_TAG) -f Dockerfile .
 
 docker-push:
 	@echo "Pushing docker image $(IMAGE)..."
-	docker push $(REGISTRY)/$(NAME):$(IMAGE_TAG)
+	docker push $(NAME):$(IMAGE_TAG)
 
 clean:
 	@echo "Cleaning up..."

@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: spire-server
+  namespace: spire
+  labels:
+    app: spire-server
+spec:
+  replicas: 1
+  serviceName: spire-server
+  selector:
+    matchLabels:
+      app: spire-server
+  template:
+    metadata:
+      namespace: spire
+      labels:
+        app: spire-server
+    spec:
+      serviceAccountName: spire-server
+      containers:
+      - name: spire-server
+        image: ghcr.io/spiffe/spire-server:1.11.0
+        imagePullPolicy: Never
+        args: ["-config", "/run/spire/server/config/server.conf"]
+        ports:
+        - containerPort: 8081
+        volumeMounts:
+        - name: spire-config
+          mountPath: /run/spire/server/config
+          readOnly: true
+        - name: spire-data
+          mountPath: /run/spire/server/data
+        - name: spire-server-socket
+          mountPath: /tmp/spire-server/private
+        - name: spire-root-agent-socket
+          mountPath: /run/spire/root-agent-sockets
+          readOnly: true
+        - name: workload-kubeconfig
+          mountPath: /run/spire/kubeconfig
+          readOnly: true
+        livenessProbe:
+          httpGet:
+            path: /live
+            port: 8080
+          failureThreshold: 2
+          initialDelaySeconds: 15
+          periodSeconds: 60
+          timeoutSeconds: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      - name: spire-controller-manager-workload
+        image: ghcr.io/spiffe/spire-controller-manager:0.6.0
+        imagePullPolicy: Never
+        args:
+        - "--kubeconfig=/run/spire/kubeconfig/workload-kubeconfig"
+        - "--config=controller-manager-config-workload.yaml"
+        ports:
+        - containerPort: 8088
+        - containerPort: 8089
+        env:
+        - name: ENABLE_WEBHOOKS
+          value: "false"
+        volumeMounts:
+        - name: spire-controller-manager-workload-config
+          mountPath: /controller-manager-config-workload.yaml
+          subPath: controller-manager-config-workload.yaml
+          readOnly: true
+        - name: workload-kubeconfig
+          mountPath: /run/spire/kubeconfig
+          readOnly: true
+        - name: spire-server-socket
+          mountPath: /spire-server
+          readOnly: true
+      volumes:
+      - name: spire-config
+        configMap:
+          name: spire-server
+      - name: spire-data
+        emptyDir: {}
+      - name: spire-server-socket
+        emptyDir: {}
+      - name: spire-root-agent-socket
+        hostPath:
+          path: /run/spire/root-agent-sockets
+          type: DirectoryOrCreate
+      - name: workload-kubeconfig
+        secret:
+          secretName: workload-kubeconfig
+      - name: spire-controller-manager-workload-config
+        configMap:
+          name: spire-controller-manager-workload-config

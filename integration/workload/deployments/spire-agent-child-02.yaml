@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: spire-agent-child-02
+  namespace: spire
+  labels:
+    app: spire-agent-child-02
+spec:
+  selector:
+    matchLabels:
+      app: spire-agent-child-02
+  template:
+    metadata:
+      labels:
+        app: spire-agent-child-02
+        cluster: workload
+    spec:
+      hostPID: true
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      serviceAccountName: spire-agent-child-02
+      containers:
+        - name: spire-agent
+          image: ghcr.io/spiffe/spire-agent:1.11.2
+          imagePullPolicy: Never
+          args: ["-config", "/run/spire/config/agent.conf"]
+          env:
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+          volumeMounts:
+            - name: spire-config
+              mountPath: /run/spire/config
+              readOnly: true
+            - name: spire-bundle
+              mountPath: /run/spire/bundle
+              readOnly: true
+            - name: spire-token
+              mountPath: /var/run/secrets/tokens
+            - name: spire-agent-socket-dir
+              mountPath: /run/spire/agent-sockets
+            - name: spire-agent-admin-socket-dir
+              mountPath: /run/spire/agent-admin-sockets
+      volumes:
+        - name: spire-config
+          configMap:
+            name: spire-agent-child-02
+        - name: spire-bundle
+          configMap:
+            name: spire-bundle-child-02
+        - name: spire-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: spire-agent-child-02
+                  expirationSeconds: 7200
+                  audience: spire-server
+        - name: spire-agent-socket-dir
+          hostPath:
+            path: /run/spire/agent-sockets
+            type: DirectoryOrCreate
+        - name: spire-agent-admin-socket-dir
+          hostPath:
+            path: /run/spire/agent-admin-sockets
+            type: DirectoryOrCreate

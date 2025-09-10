@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: spire-root-agent
+  namespace: spire
+  labels:
+    app: spire-root-agent
+spec:
+  selector:
+    matchLabels:
+      app: spire-root-agent
+  template:
+    metadata:
+      namespace: spire
+      labels:
+        app: spire-root-agent
+    spec:
+      hostPID: true
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      serviceAccountName: spire-root-agent
+      containers:
+        - name: spire-root-agent
+          image: ghcr.io/spiffe/spire-agent:1.11.2
+          imagePullPolicy: Never
+          args: ["-config", "/run/spire/config/agent.conf"]
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: MY_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+          volumeMounts:
+            - name: spire-config
+              mountPath: /run/spire/config
+              readOnly: true
+            - name: spire-bundle
+              mountPath: /run/spire/bundle
+              readOnly: true
+            - name: spire-token
+              mountPath: /var/run/secrets/tokens
+            - name: spire-root-agent-socket-dir
+              mountPath: /run/spire/root-agent-sockets
+      volumes:
+        - name: spire-config
+          configMap:
+            name: spire-root-agent
+        - name: spire-bundle
+          configMap:
+            name: spire-root-bundle
+        - name: spire-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: spire-root-agent
+                  expirationSeconds: 7200
+                  audience: spire-server
+        - name: spire-root-agent-socket-dir
+          hostPath:
+            path: /run/spire/root-agent-sockets
+            type: DirectoryOrCreate
+        - name: spire-admin-socket-dir
+          hostPath:
+            path: /run/spire/admin-socket
+            type: DirectoryOrCreate

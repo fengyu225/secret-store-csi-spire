@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:13
+    environment:
+      POSTGRES_PASSWORD: password
+      POSTGRES_USER: spire
+      POSTGRES_DB: spire
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - spire-net
+
+  # PostgreSQL for subordinate-01
+  postgres-sub01:
+    image: postgres:13
+    environment:
+      POSTGRES_PASSWORD: password
+      POSTGRES_USER: spire
+      POSTGRES_DB: spire
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_sub01_data:/var/lib/postgresql/data
+    networks:
+      - spire-net
+
+  # PostgreSQL for subordinate-02  
+  postgres-sub02:
+    image: postgres:13
+    environment:
+      POSTGRES_PASSWORD: password
+      POSTGRES_USER: spire
+      POSTGRES_DB: spire
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgres_sub02_data:/var/lib/postgresql/data
+    networks:
+      - spire-net
+
+volumes:
+  postgres_data:
+  postgres_sub01_data:
+  postgres_sub02_data:
+
+networks:
+  spire-net:
+    driver: bridge
