@@ -852,10 +852,30 @@ func createTestSVID(trustDomain, path string) *delegatedapi.X509SVIDWithKey {
 	}
 }
 
-func createTestSVIDWithExpiry(trustDomain, path string, expiry time.Time) *delegatedapi.X509SVIDWithKey {
-	svid := createTestSVID(trustDomain, path)
-	svid.X509Svid.ExpiresAt = expiry.Unix()
-	return svid
+func TestClient_StopCallsSVIDManagerCleanup(t *testing.T) {
+	logger := hclog.NewNullLogger()
+	config := Config{
+		SpireSocketPath:   "/run/spire/socket",
+		SpiffeTrustDomain: "example.org",
+	}
+
+	client, err := New(logger, config)
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+
+	originalCtx := client.svidManager.cleanupCtx
+
+	err = client.Stop()
+	if err != nil {
+		t.Errorf("Stop() returned error: %v", err)
+	}
+
+	select {
+	case <-originalCtx.Done():
+	default:
+		t.Error("SVID manager cleanup should have been called during Stop()")
+	}
 }
 
 func contains(s, substr string) bool {

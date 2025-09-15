@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"fmt"
 	"math/big"
 	"testing"
 	"time"
@@ -528,4 +529,270 @@ func generateTestCertAndKey() (*x509.Certificate, *rsa.PrivateKey) {
 	certDER, _ := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
 	cert, _ := x509.ParseCertificate(certDER)
 	return cert, key
+}
+
+func TestSVIDManager_CleanupRoutine(t *testing.T) {
+	tests := []struct {
+		name              string
+		setupSVIDs        func(*svidManager)
+		waitDuration      time.Duration
+		expectedRemaining int
+	}{
+		{
+			name: "cleanup removes expired SVIDs",
+			setupSVIDs: func(sm *svidManager) {
+				expiredSVID := createMockSVID()
+				expiredSVID.X509Svid.ExpiresAt = time.Now().Add(-1 * time.Hour).Unix()
+				sm.store["spiffe://example.org/expired"] = expiredSVID
+
+				validSVID := createMockSVID()
+				validSVID.X509Svid.ExpiresAt = time.Now().Add(1 * time.Hour).Unix()
+				sm.store["spiffe://example.org/valid"] = validSVID
+
+				zeroExpirySVID := createMockSVID()
+				zeroExpirySVID.X509Svid.ExpiresAt = 0
+				sm.store["spiffe://example.org/zero"] = zeroExpirySVID
+			},
+			waitDuration:      100 * time.Millisecond,
+			expectedRemaining: 2,
+		},
+		{
+			name:              "cleanup handles empty store",
+			setupSVIDs:        func(sm *svidManager) {},
+			waitDuration:      100 * time.Millisecond,
+			expectedRemaining: 0,
+		},
+		{
+			name: "cleanup removes multiple expired SVIDs",
+			setupSVIDs: func(sm *svidManager) {
+				for i := 0; i < 5; i++ {
+					expiredSVID := createMockSVID()
+					expiredSVID.X509Svid.ExpiresAt = time.Now().Add(-time.Duration(i+1) * time.Hour).Unix()
+					sm.store[fmt.Sprintf("spiffe://example.org/expired%d", i)] = expiredSVID
+				}
+
+				validSVID := createMockSVID()
+				validSVID.X509Svid.ExpiresAt = time.Now().Add(1 * time.Hour).Unix()
+				sm.store["spiffe://example.org/valid"] = validSVID
+			},
+			waitDuration:      100 * time.Millisecond,
+			expectedRemaining: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logger := hclog.NewNullLogger()
+			sm := newSVIDManager(logger)
+
+			sm.stopCleanup()
+
+			tt.setupSVIDs(sm)
+
+			sm.performCleanup()
+
+			if len(sm.store) != tt.expectedRemaining {
+				t.Errorf("Expected %d SVIDs remaining, got %d", tt.expectedRemaining, len(sm.store))
+			}
+
+			for spiffeID, svid := range sm.store {
+				if svid.X509Svid != nil && svid.X509Svid.ExpiresAt > 0 {
+					expiresAt := time.Unix(svid.X509Svid.ExpiresAt, 0)
+					if time.Now().After(expiresAt) {
+						t.Errorf("Expired SVID %s should have been removed", spiffeID)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestSVIDManager_StopCleanup(t *testing.T) {
+	logger := hclog.NewNullLogger()
+	sm := newSVIDManager(logger)
+
+	if sm.cleanupCtx == nil {
+		t.Error("Cleanup context should be initialized")
+	}
+
+	sm.stopCleanup()
+
+	select {
+	case <-sm.cleanupCtx.Done():
+	default:
+		t.Error("Cleanup context should be cancelled after stopCleanup")
+	}
+
+	// Calling stopCleanup again should not panic
+	sm.stopCleanup()
+}
+
+func TestSVIDManager_WaitForSVIDWithExpiredSVID(t *testing.T) {
+	tests := []struct {
+		name          string
+		setupSVID     func(*svidManager, string)
+		expectWait    bool
+		triggerUpdate bool
+	}{
+		{
+			name: "expired SVID triggers wait",
+			setupSVID: func(sm *svidManager, spiffeID string) {
+				expiredSVID := createMockSVID()
+				expiredSVID.X509Svid.ExpiresAt = time.Now().Add(-1 * time.Hour).Unix()
+				sm.store[spiffeID] = expiredSVID
+			},
+			expectWait:    true,
+			triggerUpdate: true,
+		},
+		{
+			name: "valid SVID returns immediately",
+			setupSVID: func(sm *svidManager, spiffeID string) {
+				validSVID := createMockSVID()
+				validSVID.X509Svid.ExpiresAt = time.Now().Add(1 * time.Hour).Unix()
+				sm.store[spiffeID] = validSVID
+			},
+			expectWait: false,
+		},
+		{
+			name: "SVID with zero expiry returns immediately",
+			setupSVID: func(sm *svidManager, spiffeID string) {
+				zeroExpirySVID := createMockSVID()
+				zeroExpirySVID.X509Svid.ExpiresAt = 0
+				sm.store[spiffeID] = zeroExpirySVID
+			},
+			expectWait: false,
+		},
+		{
+			name: "SVID with nil X509Svid returns immediately",
+			setupSVID: func(sm *svidManager, spiffeID string) {
+				nilSVID := &delegatedapi.X509SVIDWithKey{
+					X509Svid: nil,
+				}
+				sm.store[spiffeID] = nilSVID
+			},
+			expectWait: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logger := hclog.NewNullLogger()
+			sm := newSVIDManager(logger)
+			ctx := context.Background()
+			spiffeID := "spiffe://example.org/test"
+
+			tt.setupSVID(sm, spiffeID)
+
+			if tt.expectWait {
+				done := make(chan error, 1)
+				go func() {
+					err := sm.waitForSVID(ctx, spiffeID, 500*time.Millisecond)
+					done <- err
+				}()
+
+				time.Sleep(50 * time.Millisecond)
+
+				sm.waitersMutex.Lock()
+				_, hasWaiter := sm.waiters[spiffeID]
+				sm.waitersMutex.Unlock()
+
+				if !hasWaiter {
+					t.Error("Expected waiter to be registered for expired SVID")
+				}
+
+				if tt.triggerUpdate {
+					validSVID := createMockSVID()
+					validSVID.X509Svid.ExpiresAt = time.Now().Add(1 * time.Hour).Unix()
+					sm.mu.Lock()
+					sm.store[spiffeID] = validSVID
+					sm.mu.Unlock()
+					sm.notifyWaiters(spiffeID)
+
+					select {
+					case err := <-done:
+						if err != nil {
+							t.Errorf("Unexpected error: %v", err)
+						}
+					case <-time.After(1 * time.Second):
+						t.Error("waitForSVID should have completed after update")
+					}
+				}
+			} else {
+				// Should return immediately
+				err := sm.waitForSVID(ctx, spiffeID, 100*time.Millisecond)
+				if err != nil {
+					t.Errorf("Expected immediate return but got error: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestSVIDManager_HandleUpdateAlwaysNotifies(t *testing.T) {
+	logger := hclog.NewNullLogger()
+	sm := newSVIDManager(logger)
+
+	spiffeID := "spiffe://example.org/test"
+
+	existingSVID := createMockSVIDWithPath("example.org", "/test")
+	sm.store[spiffeID] = existingSVID
+
+	waitChan := sm.registerWaiter(spiffeID)
+
+	newSVID := createMockSVIDWithPath("example.org", "/test")
+	newSVID.X509Svid.ExpiresAt = time.Now().Add(2 * time.Hour).Unix()
+
+	go func() {
+		sm.handleUpdate([]*delegatedapi.X509SVIDWithKey{newSVID}, "example.org")
+	}()
+
+	select {
+	case <-waitChan:
+	case <-time.After(500 * time.Millisecond):
+		t.Error("Expected notification for existing SVID update")
+	}
+
+	sm.mu.RLock()
+	updatedSVID := sm.store[spiffeID]
+	sm.mu.RUnlock()
+
+	if updatedSVID.X509Svid.ExpiresAt != newSVID.X509Svid.ExpiresAt {
+		t.Error("SVID should have been updated with new expiry")
+	}
+}
+
+func TestSVIDManager_PerformCleanupRemovesParsedCerts(t *testing.T) {
+	logger := hclog.NewNullLogger()
+	sm := newSVIDManager(logger)
+
+	// Add expired SVID with parsed cert
+	expiredSVID := createMockSVID()
+	expiredSVID.X509Svid.ExpiresAt = time.Now().Add(-1 * time.Hour).Unix()
+	spiffeID := "spiffe://example.org/expired"
+	sm.store[spiffeID] = expiredSVID
+	sm.parsedCerts[spiffeID] = []*x509.Certificate{{}}
+
+	validSVID := createMockSVID()
+	validSVID.X509Svid.ExpiresAt = time.Now().Add(1 * time.Hour).Unix()
+	validSpiffeID := "spiffe://example.org/valid"
+	sm.store[validSpiffeID] = validSVID
+	sm.parsedCerts[validSpiffeID] = []*x509.Certificate{{}}
+
+	sm.performCleanup()
+
+	// Verify expired SVID and its parsed cert are removed
+	if _, exists := sm.store[spiffeID]; exists {
+		t.Error("Expired SVID should have been removed from store")
+	}
+	if _, exists := sm.parsedCerts[spiffeID]; exists {
+		t.Error("Expired SVID's parsed cert should have been removed")
+	}
+
+	// Verify valid SVID and its parsed cert remain
+	if _, exists := sm.store[validSpiffeID]; !exists {
+		t.Error("Valid SVID should remain in store")
+	}
+	if _, exists := sm.parsedCerts[validSpiffeID]; !exists {
+		t.Error("Valid SVID's parsed cert should remain")
+	}
 }

@@ -212,7 +212,6 @@ func (sm *streamManager) initializeStreams(ctx context.Context) error {
 
 	trustStream, err := client.SubscribeToX509Bundles(streamCtx, &delegatedapi.SubscribeToX509BundlesRequest{})
 	if err != nil {
-		svidStream.CloseSend()
 		return fmt.Errorf("failed to subscribe to X509 bundles: %w", err)
 	}
 
@@ -238,7 +237,7 @@ func (sm *streamManager) handleStreamError(err error, streamType string, errorCh
 		} else if isKeepaliveError(err) {
 			sm.logger.Warn(streamType+" stream keepalive error", "error", err)
 		} else {
-			sm.logger.Error(streamType+" stream error, need reconnection", "error", err)
+			sm.logger.Error(streamType+" stream error need reconnection", "error", err)
 		}
 
 		sm.streamsHealthy.Store(false)
@@ -246,6 +245,8 @@ func (sm *streamManager) handleStreamError(err error, streamType string, errorCh
 		case errorChan <- err:
 		case <-ctx.Done():
 		}
+	} else {
+		sm.logger.Error("stream error not need reconnection", "error", err)
 	}
 }
 
@@ -304,6 +305,7 @@ func (sm *streamManager) listenForBundleUpdates(ctx context.Context, errorChan c
 
 			resp, err := stream.Recv()
 			if err != nil {
+				sm.logger.Error("stream error while receiving bundle update", "error", err)
 				sm.handleStreamError(err, "bundle", errorChan, ctx)
 				return
 			}
@@ -339,6 +341,7 @@ func (sm *streamManager) monitorErrors(ctx context.Context, errChan <-chan error
 }
 
 func (sm *streamManager) shouldReconnect(err error) bool {
+	sm.logger.Error("shouldReconnect", "error", err)
 	if err == nil {
 		return false
 	}
@@ -353,9 +356,8 @@ func (sm *streamManager) shouldReconnect(err error) bool {
 	if ok {
 		switch st.Code() {
 		case codes.Canceled:
-			// Only reconnect if it's not an intentional cancellation
 			return !strings.Contains(st.Message(), "context canceled")
-		case codes.Unavailable, codes.Unknown, codes.Internal:
+		case codes.Unavailable, codes.Unknown, codes.Internal, codes.PermissionDenied:
 			return true
 		}
 	}

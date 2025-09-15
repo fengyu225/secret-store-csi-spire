@@ -3,10 +3,12 @@ package client
 import (
 	"context"
 	"errors"
-	"github.com/golang/mock/gomock"
+	"fmt"
 	"io"
 	"testing"
 	"time"
+
+	"github.com/golang/mock/gomock"
 
 	"github.com/hashicorp/go-hclog"
 	"google.golang.org/grpc/codes"
@@ -323,7 +325,7 @@ func TestStreamManager_ShouldReconnect(t *testing.T) {
 		{
 			name:     "permission denied",
 			err:      status.Error(codes.PermissionDenied, "permission denied"),
-			expected: false,
+			expected: true,
 		},
 	}
 
@@ -367,8 +369,8 @@ func TestStreamManager_HandleStreamError(t *testing.T) {
 			name:              "permission denied",
 			err:               status.Error(codes.PermissionDenied, "denied"),
 			streamType:        "SVID",
-			expectReconnect:   false,
-			expectHealthyFlag: true,
+			expectReconnect:   true,
+			expectHealthyFlag: false,
 		},
 	}
 
@@ -519,5 +521,37 @@ func TestStreamManager_ConcurrentOperations(t *testing.T) {
 		case <-time.After(1 * time.Second):
 			t.Fatal("Timeout waiting for concurrent operations")
 		}
+	}
+}
+
+func TestStreamManager_ShouldReconnectWithPermissionDenied(t *testing.T) {
+	logger := hclog.NewNullLogger()
+	client := &Client{logger: logger}
+	sm := newStreamManager(logger, client)
+
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{
+			name:     "permission denied error triggers reconnect",
+			err:      status.Error(codes.PermissionDenied, "permission denied"),
+			expected: true,
+		},
+		{
+			name:     "wrapped permission denied error",
+			err:      fmt.Errorf("stream error: %w", status.Error(codes.PermissionDenied, "denied")),
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := sm.shouldReconnect(tt.err)
+			if result != tt.expected {
+				t.Errorf("shouldReconnect(%v) = %v, want %v", tt.err, result, tt.expected)
+			}
+		})
 	}
 }

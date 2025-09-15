@@ -16,28 +16,35 @@ fi
 # Pull all required images
 pull_all_images() {
     echo "Pulling all required container images..."
-    
+
     local failed_images=()
     local pulled_count=0
+    local skipped_count=0
     local total_count=${#ALL_IMAGES[@]}
-    
+
     for image in "${ALL_IMAGES[@]}"; do
-        echo "  Pulling $image..."
-        if docker pull "$image"; then
-            ((pulled_count++))
-            echo "    Successfully pulled $image"
+        if image_exists_locally "$image"; then
+            echo "  Skipping $image (already exists locally)"
+            ((skipped_count++))
         else
-            failed_images+=("$image")
-            echo "    Failed to pull $image"
+            echo "  Pulling $image..."
+            if docker pull "$image"; then
+                ((pulled_count++))
+                echo "    Successfully pulled $image"
+            else
+                failed_images+=("$image")
+                echo "    Failed to pull $image"
+            fi
         fi
     done
-    
+
     echo ""
     echo "Image pull summary:"
     echo "  Total images: $total_count"
     echo "  Successfully pulled: $pulled_count"
+    echo "  Skipped (already local): $skipped_count"
     echo "  Failed: ${#failed_images[@]}"
-    
+
     if [[ ${#failed_images[@]} -gt 0 ]]; then
         echo ""
         echo "Failed to pull the following images:"
@@ -46,26 +53,26 @@ pull_all_images() {
         done
         return 1
     fi
-    
-    echo "  All images pulled successfully"
+
+    echo "  All required images are available"
     return 0
 }
 
 # Load images into a specific kind cluster
 load_images_to_cluster() {
     local cluster_name="$1"
-    
+
     if [[ -z "$cluster_name" ]]; then
         echo "Error: Cluster name is required"
         return 1
     fi
-    
+
     echo "Loading images into kind cluster: $cluster_name"
-    
+
     local failed_images=()
     local loaded_count=0
     local total_count=${#ALL_IMAGES[@]}
-    
+
     for image in "${ALL_IMAGES[@]}"; do
         echo "  Loading $image into $cluster_name..."
         if kind load docker-image "$image" --name "$cluster_name"; then
@@ -76,13 +83,13 @@ load_images_to_cluster() {
             echo "    Failed to load $image"
         fi
     done
-    
+
     echo ""
     echo "Image load summary for $cluster_name:"
     echo "  Total images: $total_count"
-    echo "  Successfully loaded: $loaded_count"  
+    echo "  Successfully loaded: $loaded_count"
     echo "  Failed: ${#failed_images[@]}"
-    
+
     if [[ ${#failed_images[@]} -gt 0 ]]; then
         echo ""
         echo "Failed to load the following images into $cluster_name:"
@@ -91,7 +98,7 @@ load_images_to_cluster() {
         done
         return 1
     fi
-    
+
     echo "  All images loaded successfully into $cluster_name"
     return 0
 }
@@ -99,10 +106,10 @@ load_images_to_cluster() {
 # Load images into all kind clusters
 load_images_to_all_clusters() {
     echo "Loading images into all kind clusters..."
-    
+
     local clusters=("$ROOT_CLUSTER" "$SUB01_CLUSTER" "$SUB02_CLUSTER" "workload")
     local failed_clusters=()
-    
+
     for cluster in "${clusters[@]}"; do
         echo ""
         if load_images_to_cluster "$cluster"; then
@@ -112,13 +119,13 @@ load_images_to_all_clusters() {
             echo "Failed to load images into $cluster"
         fi
     done
-    
+
     echo ""
     echo "Overall load summary:"
     echo "  Total clusters: ${#clusters[@]}"
     echo "  Successfully loaded: $((${#clusters[@]} - ${#failed_clusters[@]}))"
     echo "  Failed: ${#failed_clusters[@]}"
-    
+
     if [[ ${#failed_clusters[@]} -gt 0 ]]; then
         echo ""
         echo "Failed to load images into the following clusters:"
@@ -127,7 +134,7 @@ load_images_to_all_clusters() {
         done
         return 1
     fi
-    
+
     echo "  All images loaded successfully into all clusters"
     return 0
 }
@@ -137,21 +144,21 @@ prepare_images() {
     echo "========================================="
     echo "Preparing Container Images"
     echo "========================================="
-    
+
     # Pull all images
     if ! pull_all_images; then
         echo "Error: Failed to pull some images"
         return 1
     fi
-    
+
     echo ""
-    
+
     # Load images into all clusters
     if ! load_images_to_all_clusters; then
         echo "Error: Failed to load images into some clusters"
         return 1
     fi
-    
+
     echo ""
     echo "All container images prepared successfully"
     return 0
@@ -166,10 +173,10 @@ image_exists_locally() {
 # Verify all images are available locally
 verify_images() {
     echo "Verifying all required images are available locally..."
-    
+
     local missing_images=()
     local available_count=0
-    
+
     for image in "${ALL_IMAGES[@]}"; do
         if image_exists_locally "$image"; then
             ((available_count++))
@@ -179,13 +186,13 @@ verify_images() {
             echo "  $image (not found locally)"
         fi
     done
-    
+
     echo ""
     echo "Image verification summary:"
     echo "  Total images: ${#ALL_IMAGES[@]}"
     echo "  Available locally: $available_count"
     echo "  Missing: ${#missing_images[@]}"
-    
+
     if [[ ${#missing_images[@]} -gt 0 ]]; then
         echo ""
         echo "Missing images:"
@@ -194,7 +201,7 @@ verify_images() {
         done
         return 1
     fi
-    
+
     echo "  All required images are available locally"
     return 0
 }

@@ -81,6 +81,11 @@ func (c *Client) Stop() error {
 	c.logger.Info("stopping SPIRE Delegated Identity client")
 
 	c.streamManager.stop()
+
+	if c.svidManager != nil {
+		c.svidManager.stopCleanup()
+	}
+
 	c.conn.close()
 
 	agentID := c.config.AgentID

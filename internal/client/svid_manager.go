@@ -21,14 +21,93 @@ type svidManager struct {
 
 	waiters      map[string]chan struct{}
 	waitersMutex sync.Mutex
+
+	cleanupCtx    context.Context
+	cleanupCancel context.CancelFunc
+	cleanupOnce   sync.Once
 }
 
 func newSVIDManager(logger hclog.Logger) *svidManager {
-	return &svidManager{
+	sm := &svidManager{
 		logger:      logger,
 		store:       make(map[string]*delegatedapi.X509SVIDWithKey),
 		parsedCerts: make(map[string][]*x509.Certificate),
 		waiters:     make(map[string]chan struct{}),
+	}
+
+	sm.startCleanupRoutine()
+
+	return sm
+}
+
+func (sm *svidManager) startCleanupRoutine() {
+	sm.cleanupOnce.Do(func() {
+		sm.cleanupCtx, sm.cleanupCancel = context.WithCancel(context.Background())
+		go sm.cleanupExpiredSVIDs()
+	})
+}
+
+func (sm *svidManager) cleanupExpiredSVIDs() {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	sm.logger.Info("started SVID cleanup routine", "interval", "10s")
+
+	for {
+		select {
+		case <-sm.cleanupCtx.Done():
+			sm.logger.Info("stopping SVID cleanup routine")
+			return
+		case <-ticker.C:
+			sm.performCleanup()
+		}
+	}
+}
+
+func (sm *svidManager) performCleanup() {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	if len(sm.store) == 0 {
+		return
+	}
+
+	now := time.Now()
+	expiredCount := 0
+	toRemove := []string{}
+
+	for spiffeID, svid := range sm.store {
+		if svid.X509Svid != nil && svid.X509Svid.ExpiresAt > 0 {
+			expiresAt := time.Unix(svid.X509Svid.ExpiresAt, 0)
+
+			if now.After(expiresAt) {
+				toRemove = append(toRemove, spiffeID)
+				sm.logger.Info("removing expired SVID from cache",
+					"spiffe_id", spiffeID,
+					"expired_at", expiresAt,
+					"age", now.Sub(expiresAt),
+				)
+			}
+		}
+	}
+
+	for _, spiffeID := range toRemove {
+		delete(sm.store, spiffeID)
+		delete(sm.parsedCerts, spiffeID)
+		expiredCount++
+	}
+
+	if expiredCount > 0 {
+		sm.logger.Info("SVID cleanup completed",
+			"expired_count", expiredCount,
+			"remaining_count", len(sm.store),
+		)
+	}
+}
+
+func (sm *svidManager) stopCleanup() {
+	if sm.cleanupCancel != nil {
+		sm.cleanupCancel()
 	}
 }
 
@@ -36,12 +115,28 @@ func (sm *svidManager) waitForSVID(ctx context.Context, spiffeID string, timeout
 	sm.logger.Debug("waiting for X509 SVID", "spiffe_id", spiffeID, "timeout", timeout)
 
 	sm.mu.RLock()
-	if _, exists := sm.store[spiffeID]; exists {
+	if svid, exists := sm.store[spiffeID]; exists {
+		if svid.X509Svid != nil && svid.X509Svid.ExpiresAt > 0 {
+			expiresAt := time.Unix(svid.X509Svid.ExpiresAt, 0)
+			if time.Now().After(expiresAt) {
+				sm.mu.RUnlock()
+				sm.logger.Warn("SVID exists but is expired, waiting for new one",
+					"spiffe_id", spiffeID,
+					"expired_at", expiresAt,
+				)
+			} else {
+				sm.mu.RUnlock()
+				sm.logger.Debug("SVID already available and valid", "spiffe_id", spiffeID)
+				return nil
+			}
+		} else {
+			sm.mu.RUnlock()
+			sm.logger.Debug("SVID already available", "spiffe_id", spiffeID)
+			return nil
+		}
+	} else {
 		sm.mu.RUnlock()
-		sm.logger.Debug("SVID already available", "spiffe_id", spiffeID)
-		return nil
 	}
-	sm.mu.RUnlock()
 
 	waitChan := sm.registerWaiter(spiffeID)
 	defer sm.unregisterWaiter(spiffeID)
@@ -76,10 +171,7 @@ func (sm *svidManager) handleUpdate(svids []*delegatedapi.X509SVIDWithKey, trust
 		key := fmt.Sprintf("spiffe://%s%s", svid.X509Svid.Id.TrustDomain, svid.X509Svid.Id.Path)
 		sm.logger.Debug("adding SVID to store", "spiffe_id", key)
 		newStore[key] = svid
-
-		if _, exists := sm.store[key]; !exists {
-			sm.notifyWaiters(key)
-		}
+		sm.notifyWaiters(key)
 	}
 
 	sm.store = newStore
