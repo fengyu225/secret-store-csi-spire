@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# SPIRE CSI Provider Performance Test
+# SPIRE CSI Provider Performance Test with SVID Rotation Verification
 
 set -e
 
@@ -14,6 +14,11 @@ SUB02_CONTEXT="kind-spire-subordinate-02"
 SEQUENTIAL_MODE=false
 CLEANUP_BETWEEN_TESTS=true
 EXPORT_RESULTS=true
+CHECK_SVID_ROTATION=true
+
+readonly SVID_PATH="/run/spire/x509/cert.pem"
+readonly ROTATION_CHECK_INTERVAL=10
+readonly SVID_ROTATION_TIMEOUT=60
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -32,6 +37,14 @@ while [[ $# -gt 0 ]]; do
         --no-export)
             EXPORT_RESULTS=false
             shift
+            ;;
+        --no-svid-rotation)
+            CHECK_SVID_ROTATION=false
+            shift
+            ;;
+        --svid-timeout)
+            SVID_ROTATION_TIMEOUT="$2"
+            shift 2
             ;;
         --check-csi)
             echo "Checking CSI components..." >&2
@@ -57,6 +70,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --no-cleanup        Don't cleanup between different replica tests"
             echo "  --replicas N,N,N    Custom replica counts (default: 50,100,150,200)"
             echo "  --no-export         Don't export results to file"
+            echo "  --no-svid-rotation  Skip SVID rotation verification"
+            echo "  --svid-timeout N    SVID rotation timeout in seconds (default: 60)"
             echo "  --check-csi         Check CSI component status and exit"
             echo "  -h, --help          Show this help message"
             echo ""
@@ -64,6 +79,8 @@ while [[ $# -gt 0 ]]; do
             echo "  $0                              # Run with defaults"
             echo "  $0 --replicas 10,20,30          # Test with custom replica counts"
             echo "  $0 --sequential --no-cleanup    # Sequential deployment, no cleanup"
+            echo "  $0 --no-svid-rotation           # Skip SVID rotation checks"
+            echo "  $0 --svid-timeout 120           # Wait up to 120s for SVID rotation"
             echo "  $0 --check-csi                  # Check CSI components status"
             exit 0
             ;;
@@ -91,9 +108,11 @@ RESULTS_FILE="$RESULTS_DIR/perf_test_${TIMESTAMP}.json"
 SUMMARY_FILE="$RESULTS_DIR/perf_summary_${TIMESTAMP}.txt"
 POD_TIMES_FILE="/tmp/pod_startup_times_${TIMESTAMP}.txt"
 POD_TRACKING_FILE="/tmp/pod_tracking_${TIMESTAMP}.txt"
+SVID_HASHES_FILE="/tmp/svid_hashes_${TIMESTAMP}.txt"
 
 echo -e "${CYAN}========================================${NC}"
 echo -e "${CYAN}SPIRE CSI Provider Performance Test${NC}"
+echo -e "${CYAN}with SVID Rotation Verification${NC}"
 echo -e "${CYAN}========================================${NC}"
 echo ""
 echo "Test Configuration:"
@@ -101,6 +120,10 @@ echo "  Replica counts: ${REPLICA_COUNTS[*]}"
 echo "  Sequential mode: $SEQUENTIAL_MODE"
 echo "  Cleanup between tests: $CLEANUP_BETWEEN_TESTS"
 echo "  Export results: $EXPORT_RESULTS"
+echo "  Check SVID rotation: $CHECK_SVID_ROTATION"
+if [ "$CHECK_SVID_ROTATION" = true ]; then
+    echo "  SVID rotation timeout: ${SVID_ROTATION_TIMEOUT}s"
+fi
 echo ""
 
 if [ "$EXPORT_RESULTS" = true ]; then
@@ -130,6 +153,104 @@ print_info() {
 
 print_metric() {
     echo -e "  ${CYAN}$1:${NC} $2" >&2
+}
+
+get_svid_hash() {
+    local pod_name="$1"
+
+    if [[ -z "$pod_name" ]]; then
+        echo "NOPOD"
+        return 1
+    fi
+
+    local file_exists=$(kubectl --context "$WORKLOAD_CONTEXT" exec -n "$TEST_NAMESPACE" "$pod_name" -c test -- \
+        sh -c "test -f $SVID_PATH && echo 'YES' || echo 'NO'" 2>/dev/null || echo "ERROR")
+
+    if [[ "$file_exists" == "NO" ]]; then
+        echo "NOFILE"
+        return 1
+    elif [[ "$file_exists" == "ERROR" ]]; then
+        echo "ERROR"
+        return 1
+    fi
+
+    local hash=$(kubectl --context "$WORKLOAD_CONTEXT" exec -n "$TEST_NAMESPACE" "$pod_name" -c test -- \
+        sh -c "md5sum $SVID_PATH 2>/dev/null | cut -d' ' -f1" 2>/dev/null || echo "")
+
+    if [[ -z "$hash" ]]; then
+        hash=$(kubectl --context "$WORKLOAD_CONTEXT" exec -n "$TEST_NAMESPACE" "$pod_name" -c test -- \
+            sh -c "sha256sum $SVID_PATH 2>/dev/null | cut -d' ' -f1 | head -c 16" 2>/dev/null || echo "")
+    fi
+
+    if [[ -z "$hash" ]]; then
+        echo "EMPTY"
+        return 1
+    fi
+
+    echo "$hash"
+}
+
+check_svid_provisioning() {
+    local pod_name="$1"
+
+    if [[ -z "$pod_name" ]]; then
+        return 1
+    fi
+
+    local mount_exists=$(kubectl --context "$WORKLOAD_CONTEXT" exec -n "$TEST_NAMESPACE" "$pod_name" -c test -- \
+        sh -c "test -d /run/spire && echo 'YES' || echo 'NO'" 2>/dev/null || echo "ERROR")
+
+    if [[ "$mount_exists" != "YES" ]]; then
+        return 1
+    fi
+
+    local x509_exists=$(kubectl --context "$WORKLOAD_CONTEXT" exec -n "$TEST_NAMESPACE" "$pod_name" -c test -- \
+        sh -c "test -d /run/spire/x509 && echo 'YES' || echo 'NO'" 2>/dev/null || echo "ERROR")
+
+    if [[ "$x509_exists" != "YES" ]]; then
+        return 1
+    fi
+
+    local svid_exists=$(kubectl --context "$WORKLOAD_CONTEXT" exec -n "$TEST_NAMESPACE" "$pod_name" -c test -- \
+        sh -c "test -f $SVID_PATH && echo 'YES' || echo 'NO'" 2>/dev/null || echo "ERROR")
+
+    if [[ "$svid_exists" != "YES" ]]; then
+        return 1
+    fi
+
+    return 0
+}
+
+wait_for_svid_rotation() {
+    local pod_name="$1"
+    local initial_hash="$2"
+    local timeout="$3"
+    local elapsed=0
+
+    if [[ "$initial_hash" == "NOFILE" ]] || [[ "$initial_hash" == "ERROR" ]] ||
+       [[ "$initial_hash" == "NOPOD" ]] || [[ "$initial_hash" == "EMPTY" ]] ||
+       [[ -z "$initial_hash" ]]; then
+        return 1
+    fi
+
+    while [ $elapsed -lt $timeout ]; do
+        sleep $ROTATION_CHECK_INTERVAL
+        elapsed=$((elapsed + ROTATION_CHECK_INTERVAL))
+
+        local current_hash=$(get_svid_hash "$pod_name")
+
+        if [[ "$current_hash" == "NOPOD" ]] || [[ "$current_hash" == "NOFILE" ]] ||
+           [[ "$current_hash" == "ERROR" ]] || [[ "$current_hash" == "EMPTY" ]] ||
+           [[ -z "$current_hash" ]]; then
+            continue
+        fi
+
+        if [[ "$current_hash" != "$initial_hash" ]]; then
+            return 0  # Rotation successful
+        fi
+    done
+
+    return 1  # Rotation failed/timed out
 }
 
 create_perf_deployment() {
@@ -195,7 +316,9 @@ spec:
       serviceAccountName: test-workload-sa
       containers:
         - name: test
-          image: k8s.gcr.io/pause:3.9
+          image: alpine:3.19
+          imagePullPolicy: Never
+          command: ["sleep", "3600"]
           resources:
             requests:
               memory: "4Mi"
@@ -259,7 +382,6 @@ calculate_percentile() {
     sed -n "${index}p" "$sorted_file" 2>/dev/null || echo "0"
 }
 
-# Fixed measure_pod_times_with_status function
 measure_pod_times_with_status() {
     local replicas=$1
     local deployment_start=$(date +%s)
@@ -273,40 +395,64 @@ measure_pod_times_with_status() {
     local max_wait=300
     local check_interval=1
     local elapsed=0
-
-    # Record deployment creation time for all pods
     local deployment_epoch=$deployment_start
+
+    # Use associative arrays to track pods (if bash 4+, otherwise use files)
+    declare -A pod_tracked 2>/dev/null || local use_files=true
 
     while true; do
         local status_dist=$(get_pod_status_distribution)
 
-        # Get all pods and process them
-        kubectl --context "$WORKLOAD_CONTEXT" get pods -n "$TEST_NAMESPACE" \
-            -l app="$TEST_DEPLOYMENT" --no-headers 2>/dev/null | while read line; do
+        while read -r line; do
+            [[ -z "$line" ]] && continue
 
             local pod_name=$(echo "$line" | awk '{print $1}')
             local ready=$(echo "$line" | awk '{print $2}')
             local pod_status=$(echo "$line" | awk '{print $3}')
 
-            # Track new pods
-            if ! grep -q "^${pod_name}|" "$POD_TRACKING_FILE" 2>/dev/null; then
-                echo "${pod_name}|pending|${deployment_epoch}" >> "$POD_TRACKING_FILE"
+            if [[ -n "$use_files" ]]; then
+                if ! grep -q "^${pod_name}|" "$POD_TRACKING_FILE" 2>/dev/null; then
+                    echo "${pod_name}|pending|${deployment_epoch}" >> "$POD_TRACKING_FILE"
+                fi
+            else
+                if [[ -z "${pod_tracked[$pod_name]:-}" ]]; then
+                    pod_tracked[$pod_name]="pending"
+                    echo "${pod_name}|pending|${deployment_epoch}" >> "$POD_TRACKING_FILE"
+                fi
             fi
 
-            # Check if pod is ready and we haven't recorded its time
             if [ "$pod_status" = "Running" ] && [ "$ready" = "1/1" ]; then
-                if ! grep -q "^${pod_name}|running|" "$POD_TRACKING_FILE" 2>/dev/null; then
-                    # Pod is now running, calculate time since deployment
+                local already_timed=false
+
+                if [[ -n "$use_files" ]]; then
+                    if grep -q "^${pod_name}|running|" "$POD_TRACKING_FILE" 2>/dev/null; then
+                        already_timed=true
+                    fi
+                else
+                    if [[ "${pod_tracked[$pod_name]:-}" == "running" ]]; then
+                        already_timed=true
+                    fi
+                fi
+
+                if [[ "$already_timed" == "false" ]]; then
                     local current_time=$(date +%s)
                     local startup_time=$((current_time - deployment_epoch))
 
-                    # Update tracking
-                    sed -i.bak "/^${pod_name}|/d" "$POD_TRACKING_FILE" 2>/dev/null
-                    echo "${pod_name}|running|${startup_time}" >> "$POD_TRACKING_FILE"
+                    if [[ -n "$use_files" ]]; then
+                        grep -v "^${pod_name}|" "$POD_TRACKING_FILE" 2>/dev/null > "${POD_TRACKING_FILE}.tmp" || true
+                        echo "${pod_name}|running|${startup_time}" >> "${POD_TRACKING_FILE}.tmp"
+                        mv "${POD_TRACKING_FILE}.tmp" "$POD_TRACKING_FILE"
+                    else
+                        pod_tracked[$pod_name]="running"
+                        sed -i.bak "/^${pod_name}|/d" "$POD_TRACKING_FILE" 2>/dev/null || true
+                        echo "${pod_name}|running|${startup_time}" >> "$POD_TRACKING_FILE"
+                    fi
+
                     echo "$startup_time" >> "$POD_TIMES_FILE"
                 fi
             fi
-        done
+        done < <(kubectl --context "$WORKLOAD_CONTEXT" get pods -n "$TEST_NAMESPACE" \
+            -l app="$TEST_DEPLOYMENT" --no-headers 2>/dev/null)
 
         running_count=$(kubectl --context "$WORKLOAD_CONTEXT" get pods -n "$TEST_NAMESPACE" \
             -l app="$TEST_DEPLOYMENT" --no-headers 2>/dev/null | \
@@ -318,7 +464,11 @@ measure_pod_times_with_status() {
         pods_with_times=${pods_with_times:-0}
         echo -ne "\r  [${elapsed}s] Running: $running_count/$replicas | Timed: $pods_with_times | Status: $status_dist    " >&2
 
-        if [ "$running_count" -ge "$replicas" ] || [ "$elapsed" -ge "$max_wait" ]; then
+        if [ "$running_count" -ge "$replicas" ]; then
+            if [ "$pods_with_times" -ge "$running_count" ] || [ "$elapsed" -ge "$((max_wait))" ]; then
+                break
+            fi
+        elif [ "$elapsed" -ge "$max_wait" ]; then
             break
         fi
 
@@ -327,6 +477,30 @@ measure_pod_times_with_status() {
     done
 
     echo "" >&2
+
+    local final_timed_count=$(wc -l < "$POD_TIMES_FILE" 2>/dev/null | tr -d ' ')
+    if [ "$running_count" -gt "$final_timed_count" ] && [ "$elapsed" -lt "$max_wait" ]; then
+        print_info "Final verification pass to capture remaining pod timings..."
+        sleep 2
+
+        while read -r line; do
+            [[ -z "$line" ]] && continue
+
+            local pod_name=$(echo "$line" | awk '{print $1}')
+            local ready=$(echo "$line" | awk '{print $2}')
+            local pod_status=$(echo "$line" | awk '{print $3}')
+
+            if [ "$pod_status" = "Running" ] && [ "$ready" = "1/1" ]; then
+                if ! grep -q "^${pod_name}|running|" "$POD_TRACKING_FILE" 2>/dev/null; then
+                    local current_time=$(date +%s)
+                    local startup_time=$((current_time - deployment_epoch))
+                    echo "${pod_name}|running|${startup_time}" >> "$POD_TRACKING_FILE"
+                    echo "$startup_time" >> "$POD_TIMES_FILE"
+                fi
+            fi
+        done < <(kubectl --context "$WORKLOAD_CONTEXT" get pods -n "$TEST_NAMESPACE" \
+            -l app="$TEST_DEPLOYMENT" --no-headers 2>/dev/null)
+    fi
 
     if [ "$running_count" -ge "$replicas" ]; then
         print_success "All $replicas pods are running in ${elapsed}s"
@@ -354,6 +528,10 @@ measure_pod_times_with_status() {
         p99=$(calculate_percentile 99 "${POD_TIMES_FILE}.sorted")
 
         print_info "Collected timing data for $pod_count/$replicas pods"
+        if [ "$pod_count" -lt "$running_count" ]; then
+            print_warning "Missing timing data for $((running_count - pod_count)) pods (may have started before measurement began)"
+        fi
+
         if [ "$pod_count" -gt 0 ]; then
             print_info "Startup time distribution: Min=${min_time}s, P50=${p50}s, P90=${p90}s, Max=${max_time}s"
 
@@ -419,6 +597,149 @@ measure_csi_mounts() {
     print_metric "Failed mount events" "$failed_mounts"
 
     echo "${mounted_count},${failed_mounts}"
+}
+
+measure_svid_rotation() {
+    local replicas=$1
+
+    if [ "$CHECK_SVID_ROTATION" = false ]; then
+        echo "0,0,0"  # rotated_count, failed_rotations, skipped_count
+        return 0
+    fi
+
+    print_info "Testing SVID rotation for ALL $replicas replicas (timeout: ${SVID_ROTATION_TIMEOUT}s)..."
+
+    > "$SVID_HASHES_FILE"
+    local rotated_count=0
+    local failed_rotations=0
+    local skipped_count=0
+
+    local pod_names=$(kubectl --context "$WORKLOAD_CONTEXT" get pods -n "$TEST_NAMESPACE" \
+        -l app="$TEST_DEPLOYMENT" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)
+
+    if [[ -z "$pod_names" ]]; then
+        print_warning "No pods found for SVID rotation testing"
+        echo "0,${replicas},0"
+        return 1
+    fi
+
+    local pod_array=($pod_names)
+    local total_pods=${#pod_array[@]}
+
+    print_info "Collecting initial SVID hashes from ALL $total_pods pods..."
+
+    # Step 1: Get initial hashes from all pods (using temp file for bash 3.x compatibility)
+    local initial_hashes_file="/tmp/initial_hashes_${TIMESTAMP}.txt"
+    > "$initial_hashes_file"
+
+    local pod_index=0
+    for pod_name in "${pod_array[@]}"; do
+        pod_index=$((pod_index + 1))
+        echo -ne "\r  Collecting initial SVID hashes: $pod_index/$total_pods pods..." >&2
+
+        if check_svid_provisioning "$pod_name"; then
+            local initial_hash=$(get_svid_hash "$pod_name")
+
+            if [[ "$initial_hash" != "NOFILE" ]] && [[ "$initial_hash" != "ERROR" ]] &&
+               [[ "$initial_hash" != "NOPOD" ]] && [[ "$initial_hash" != "EMPTY" ]] &&
+               [[ -n "$initial_hash" ]]; then
+                echo "${pod_name}|${initial_hash}" >> "$initial_hashes_file"
+                echo "${pod_name}:${initial_hash}:initial" >> "$SVID_HASHES_FILE"
+            else
+                skipped_count=$((skipped_count + 1))
+                if [ "$pod_index" -le 5 ]; then
+                    print_warning "Skipping pod $pod_name - SVID not accessible (status: $initial_hash)"
+                fi
+            fi
+        else
+            skipped_count=$((skipped_count + 1))
+            if [ "$pod_index" -le 5 ]; then
+                print_warning "Skipping pod $pod_name - SVID not provisioned"
+            fi
+        fi
+    done
+
+    echo "" >&2
+
+    local tested_pods=$(wc -l < "$initial_hashes_file" 2>/dev/null | tr -d ' ')
+    tested_pods=${tested_pods:-0}
+
+    if [ $tested_pods -eq 0 ]; then
+        print_warning "No pods with valid SVIDs found for rotation testing"
+        rm -f "$initial_hashes_file"
+        echo "0,${total_pods},0"
+        return 1
+    fi
+
+    print_info "Collected initial hashes from $tested_pods pods"
+
+    # Step 2: Wait for rotation period
+    print_info "Waiting ${SVID_ROTATION_TIMEOUT}s for SVID rotation to occur..."
+    local wait_interval=10
+    local elapsed=0
+    while [ $elapsed -lt $SVID_ROTATION_TIMEOUT ]; do
+        sleep $wait_interval
+        elapsed=$((elapsed + wait_interval))
+        echo -ne "\r  Waiting for rotation: ${elapsed}/${SVID_ROTATION_TIMEOUT}s..." >&2
+    done
+    echo "" >&2
+
+    # Step 3: Check all pods for rotation
+    print_info "Checking all pods for SVID rotation..."
+    local check_index=0
+    while IFS='|' read -r pod_name initial_hash; do
+        [[ -z "$pod_name" ]] && continue
+        check_index=$((check_index + 1))
+        echo -ne "\r  Checking rotation: $check_index/$tested_pods pods..." >&2
+
+        local current_hash=$(get_svid_hash "$pod_name")
+
+        if [[ "$current_hash" != "NOFILE" ]] && [[ "$current_hash" != "ERROR" ]] &&
+           [[ "$current_hash" != "NOPOD" ]] && [[ "$current_hash" != "EMPTY" ]] &&
+           [[ -n "$current_hash" ]]; then
+
+            if [[ "$current_hash" != "$initial_hash" ]]; then
+                rotated_count=$((rotated_count + 1))
+                echo "${pod_name}:${initial_hash}:${current_hash}:rotated" >> "$SVID_HASHES_FILE"
+            else
+                failed_rotations=$((failed_rotations + 1))
+                echo "${pod_name}:${initial_hash}:${current_hash}:no_rotation" >> "$SVID_HASHES_FILE"
+            fi
+        else
+            failed_rotations=$((failed_rotations + 1))
+            echo "${pod_name}:${initial_hash}:${current_hash}:read_error" >> "$SVID_HASHES_FILE"
+        fi
+    done < "$initial_hashes_file"
+
+    rm -f "$initial_hashes_file"
+
+    echo "" >&2
+
+    local rotation_rate=0
+    if [ $tested_pods -gt 0 ]; then
+        rotation_rate=$(echo "scale=1; $rotated_count * 100 / $tested_pods" | bc 2>/dev/null || echo "0")
+    fi
+
+    print_metric "Total pods found" "$total_pods"
+    print_metric "Pods tested for rotation" "$tested_pods"
+    print_metric "SVIDs rotated successfully" "$rotated_count"
+    print_metric "SVID rotation failures" "$failed_rotations"
+    print_metric "Pods skipped (no SVID)" "$skipped_count"
+    print_metric "SVID rotation success rate" "${rotation_rate}%"
+
+    if [ $rotated_count -gt 0 ]; then
+        print_success "SVID rotation is working (${rotated_count}/${tested_pods} pods)"
+    elif [ $failed_rotations -gt 0 ]; then
+        print_failure "SVID rotation failed for all tested pods"
+    else
+        print_warning "No pods available for SVID rotation testing"
+    fi
+
+    if [ $skipped_count -gt 5 ]; then
+        print_info "Note: $skipped_count pods were skipped (first 5 warnings shown to avoid spam)"
+    fi
+
+    echo "${rotated_count},${failed_rotations},${skipped_count}"
 }
 
 get_csi_metrics() {
@@ -497,7 +818,7 @@ run_perf_test() {
     local replicas=$1
     local test_num=$2
 
-    print_test "Performance Test #$test_num: $replicas Replicas"
+    print_test "Performance Test #$test_num: $replicas Replicas with SVID Rotation"
 
     local start_time=$(date +%s)
 
@@ -522,6 +843,14 @@ run_perf_test() {
     successful_mounts=${successful_mounts:-0}
     failed_mounts=${failed_mounts:-0}
 
+    svid_metrics=$(measure_svid_rotation "$replicas" | tail -1)
+    svid_rotated=$(echo "$svid_metrics" | cut -d',' -f1)
+    svid_failed=$(echo "$svid_metrics" | cut -d',' -f2)
+    svid_skipped=$(echo "$svid_metrics" | cut -d',' -f3)
+    svid_rotated=${svid_rotated:-0}
+    svid_failed=${svid_failed:-0}
+    svid_skipped=${svid_skipped:-0}
+
     csi_metrics=$(get_csi_metrics | tail -1)
     csi_pods=$(echo "$csi_metrics" | cut -d',' -f1)
     provider_pods=$(echo "$csi_metrics" | cut -d',' -f2)
@@ -539,6 +868,13 @@ run_perf_test() {
     mount_rate=$(safe_divide "$successful_mounts" "$replicas" 1)
     mount_rate=$(echo "$mount_rate * 100" | bc 2>/dev/null || echo "0")
 
+    local svid_rotation_rate=0
+    local svid_tested=$((svid_rotated + svid_failed))
+    if [ $svid_tested -gt 0 ]; then
+        svid_rotation_rate=$(safe_divide "$svid_rotated" "$svid_tested" 1)
+        svid_rotation_rate=$(echo "$svid_rotation_rate * 100" | bc 2>/dev/null || echo "0")
+    fi
+
     echo "" >&2
     echo "Performance Results for $replicas Replicas:" >&2
     echo "===========================================" >&2
@@ -553,9 +889,20 @@ run_perf_test() {
     print_metric "  P99" "${p99_time}s"
     print_metric "  Maximum" "${max_time}s"
     echo "" >&2
-    print_metric "Successful CSI mounts" "$successful_mounts"
-    print_metric "Failed CSI mounts" "$failed_mounts"
-    print_metric "Mount success rate" "${mount_rate}%"
+    echo "  CSI Mount Statistics:" >&2
+    print_metric "  Successful CSI mounts" "$successful_mounts"
+    print_metric "  Failed CSI mounts" "$failed_mounts"
+    print_metric "  Mount success rate" "${mount_rate}%"
+    echo "" >&2
+    echo "  SVID Rotation Statistics:" >&2
+    if [ "$CHECK_SVID_ROTATION" = true ]; then
+        print_metric "  SVID rotations successful" "$svid_rotated"
+        print_metric "  SVID rotation failures" "$svid_failed"
+        print_metric "  SVID rotation success rate" "${svid_rotation_rate}%"
+    else
+        print_metric "  SVID rotation testing" "DISABLED"
+    fi
+    echo "" >&2
     print_metric "CSI/Provider errors" "${csi_errors}/${provider_errors}"
 
     if [ "$EXPORT_RESULTS" = true ]; then
@@ -575,6 +922,10 @@ run_perf_test() {
   "successful_mounts": $successful_mounts,
   "failed_mounts": $failed_mounts,
   "mount_success_rate": ${mount_rate:-0},
+  "svid_rotated": $svid_rotated,
+  "svid_rotation_failures": $svid_failed,
+  "svid_rotation_success_rate": ${svid_rotation_rate:-0},
+  "svid_rotation_enabled": $([ "$CHECK_SVID_ROTATION" = true ] && echo "true" || echo "false"),
   "csi_driver_pods": ${csi_pods:-0},
   "provider_pods": ${provider_pods:-0},
   "csi_errors": ${csi_errors:-0},
@@ -583,7 +934,7 @@ run_perf_test() {
 EOF
     fi
 
-    rm -f "$POD_TIMES_FILE" "${POD_TIMES_FILE}.sorted" "${POD_TIMES_FILE}.tracked" "$POD_TRACKING_FILE" "${POD_TRACKING_FILE}.bak"
+    rm -f "$POD_TIMES_FILE" "${POD_TIMES_FILE}.sorted" "${POD_TIMES_FILE}.tracked" "$POD_TRACKING_FILE" "${POD_TRACKING_FILE}.bak" "$SVID_HASHES_FILE"
 
     if [ "$CLEANUP_BETWEEN_TESTS" = true ]; then
         cleanup_test_namespace
@@ -646,6 +997,24 @@ pre_test_validation() {
         print_success "CSI nodes registered: $csi_nodes"
     fi
 
+    if [ "$CHECK_SVID_ROTATION" = true ]; then
+        print_info "Validating SPIRE agents for SVID rotation testing..."
+
+        local agent_01_running=$(kubectl --context "$WORKLOAD_CONTEXT" get pods -n spire \
+            -l app=spire-agent-child-01 --no-headers 2>/dev/null | \
+            awk '$3=="Running" {count++} END {print count+0}')
+
+        local agent_02_running=$(kubectl --context "$WORKLOAD_CONTEXT" get pods -n spire \
+            -l app=spire-agent-child-02 --no-headers 2>/dev/null | \
+            awk '$3=="Running" {count++} END {print count+0}')
+
+        if [ "$agent_01_running" -gt 0 ] || [ "$agent_02_running" -gt 0 ]; then
+            print_success "SPIRE agents are running (agent-01: $agent_01_running, agent-02: $agent_02_running)"
+        else
+            print_warning "No SPIRE agents found - SVID rotation may not work"
+        fi
+    fi
+
     cleanup_test_namespace
 }
 
@@ -664,6 +1033,8 @@ Test Configuration:
   - Replica counts tested: ${REPLICA_COUNTS[*]}
   - Sequential mode: $SEQUENTIAL_MODE
   - Pod resources: 1m CPU, 4Mi memory (minimal)
+  - SVID rotation testing: $CHECK_SVID_ROTATION
+$([ "$CHECK_SVID_ROTATION" = true ] && echo "  - SVID rotation timeout: ${SVID_ROTATION_TIMEOUT}s" || echo "")
 
 Performance Results:
 EOF
@@ -685,8 +1056,13 @@ EOF
         mv "${RESULTS_FILE}.tmp" "$RESULTS_FILE"
 
         if command -v jq &>/dev/null; then
-            jq -r '.[] | "Replicas: \(.replicas) - Avg: \(.avg_startup_time)s, P50: \(.p50_startup_time)s, P90: \(.p90_startup_time)s, P99: \(.p99_startup_time)s, Max: \(.max_startup_time)s, Mount Success: \(.mount_success_rate)%"' \
-                "$RESULTS_FILE" >> "$SUMMARY_FILE"
+            if [ "$CHECK_SVID_ROTATION" = true ]; then
+                jq -r '.[] | "Replicas: \(.replicas) - Startup: Avg=\(.avg_startup_time)s, P90=\(.p90_startup_time)s - Mount Success: \(.mount_success_rate)% - SVID Rotation: \(.svid_rotation_success_rate)%"' \
+                    "$RESULTS_FILE" >> "$SUMMARY_FILE"
+            else
+                jq -r '.[] | "Replicas: \(.replicas) - Startup: Avg=\(.avg_startup_time)s, P90=\(.p90_startup_time)s - Mount Success: \(.mount_success_rate)%"' \
+                    "$RESULTS_FILE" >> "$SUMMARY_FILE"
+            fi
         fi
     fi
 
@@ -696,7 +1072,7 @@ EOF
 }
 
 main() {
-    echo "Starting performance tests with minimal pod resources..." >&2
+    echo "Starting performance tests with SVID rotation verification..." >&2
     echo "" >&2
 
     pre_test_validation
@@ -739,7 +1115,7 @@ main() {
 cleanup_on_exit() {
     print_warning "Test interrupted, cleaning up..."
     cleanup_test_namespace
-    rm -f "$POD_TIMES_FILE" "${POD_TIMES_FILE}.sorted" "${POD_TIMES_FILE}.tracked" "$POD_TRACKING_FILE" "${POD_TRACKING_FILE}.bak"
+    rm -f "$POD_TIMES_FILE" "${POD_TIMES_FILE}.sorted" "${POD_TIMES_FILE}.tracked" "$POD_TRACKING_FILE" "${POD_TRACKING_FILE}.bak" "$SVID_HASHES_FILE"
 }
 
 trap cleanup_on_exit EXIT INT TERM
