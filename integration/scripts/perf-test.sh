@@ -1,0 +1,747 @@
+#!/bin/bash
+
+# SPIRE CSI Provider Performance Test
+
+set -e
+
+REPLICA_COUNTS=(50 100 150 200)
+TEST_NAMESPACE="perf-test"
+TEST_DEPLOYMENT="perf-workload"
+WORKLOAD_CONTEXT="kind-workload"
+SUB01_CONTEXT="kind-spire-subordinate-01"
+SUB02_CONTEXT="kind-spire-subordinate-02"
+
+SEQUENTIAL_MODE=false
+CLEANUP_BETWEEN_TESTS=true
+EXPORT_RESULTS=true
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --sequential)
+            SEQUENTIAL_MODE=true
+            shift
+            ;;
+        --no-cleanup)
+            CLEANUP_BETWEEN_TESTS=false
+            shift
+            ;;
+        --replicas)
+            IFS=',' read -ra REPLICA_COUNTS <<< "$2"
+            shift 2
+            ;;
+        --no-export)
+            EXPORT_RESULTS=false
+            shift
+            ;;
+        --check-csi)
+            echo "Checking CSI components..." >&2
+            echo "" >&2
+            echo "CSI Driver DaemonSets in kube-system:" >&2
+            kubectl get ds -n kube-system -o wide | grep -i csi >&2 || echo "  None found" >&2
+            echo "" >&2
+            echo "SPIRE CSI Provider in csi namespace:" >&2
+            kubectl get ds -n csi -o wide 2>/dev/null >&2 || echo "  Namespace 'csi' not found" >&2
+            echo "" >&2
+            echo "CSI Driver pods in kube-system:" >&2
+            kubectl get pods -n kube-system -o wide | grep -i csi >&2 || echo "  None found" >&2
+            echo "" >&2
+            echo "CSI Nodes:" >&2
+            kubectl get csinodes >&2 || echo "  None found" >&2
+            exit 0
+            ;;
+        -h|--help)
+            echo "Usage: $0 [OPTIONS]"
+            echo ""
+            echo "Options:"
+            echo "  --sequential         Deploy pods one by one instead of all at once"
+            echo "  --no-cleanup        Don't cleanup between different replica tests"
+            echo "  --replicas N,N,N    Custom replica counts (default: 50,100,150,200)"
+            echo "  --no-export         Don't export results to file"
+            echo "  --check-csi         Check CSI component status and exit"
+            echo "  -h, --help          Show this help message"
+            echo ""
+            echo "Example:"
+            echo "  $0                              # Run with defaults"
+            echo "  $0 --replicas 10,20,30          # Test with custom replica counts"
+            echo "  $0 --sequential --no-cleanup    # Sequential deployment, no cleanup"
+            echo "  $0 --check-csi                  # Check CSI components status"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Run '$0 --help' for usage information"
+            exit 1
+            ;;
+    esac
+done
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+PURPLE='\033[0;35m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+INTEGRATION_DIR="$(dirname "$SCRIPT_DIR")"
+RESULTS_DIR="$SCRIPT_DIR/perf-results"
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+RESULTS_FILE="$RESULTS_DIR/perf_test_${TIMESTAMP}.json"
+SUMMARY_FILE="$RESULTS_DIR/perf_summary_${TIMESTAMP}.txt"
+POD_TIMES_FILE="/tmp/pod_startup_times_${TIMESTAMP}.txt"
+POD_TRACKING_FILE="/tmp/pod_tracking_${TIMESTAMP}.txt"
+
+echo -e "${CYAN}========================================${NC}"
+echo -e "${CYAN}SPIRE CSI Provider Performance Test${NC}"
+echo -e "${CYAN}========================================${NC}"
+echo ""
+echo "Test Configuration:"
+echo "  Replica counts: ${REPLICA_COUNTS[*]}"
+echo "  Sequential mode: $SEQUENTIAL_MODE"
+echo "  Cleanup between tests: $CLEANUP_BETWEEN_TESTS"
+echo "  Export results: $EXPORT_RESULTS"
+echo ""
+
+if [ "$EXPORT_RESULTS" = true ]; then
+    mkdir -p "$RESULTS_DIR"
+fi
+
+print_test() {
+    echo -e "\n${BLUE}TEST: $1${NC}" >&2
+    echo "=========================================" >&2
+}
+
+print_success() {
+    echo -e "${GREEN}[PASS]${NC} $1" >&2
+}
+
+print_failure() {
+    echo -e "${RED}[FAIL]${NC} $1" >&2
+}
+
+print_warning() {
+    echo -e "${YELLOW}[WARN]${NC} $1" >&2
+}
+
+print_info() {
+    echo -e "${PURPLE}[INFO]${NC} $1" >&2
+}
+
+print_metric() {
+    echo -e "  ${CYAN}$1:${NC} $2" >&2
+}
+
+create_perf_deployment() {
+    local replicas=$1
+
+    cat <<EOF
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: $TEST_NAMESPACE
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: test-workload-sa
+  namespace: $TEST_NAMESPACE
+---
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: spire
+  namespace: $TEST_NAMESPACE
+spec:
+  provider: spire
+  parameters:
+    useCase: "mesh"
+    trustDomain: "example.org"
+    objects: |
+      - objectName: "x509"
+        type: "x509-svid"
+        filePermission: 0640
+        paths:
+          - "x509/cert.pem"
+          - "x509/key.pem"
+          - "x509/bundle.pem"
+      - objectName: "app1-jwt"
+        type: "jwt-svid"
+        filePermission: 0640
+        audience:
+          - "app1"
+        paths:
+          - "jwt/app1.token"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: $TEST_DEPLOYMENT
+  namespace: $TEST_NAMESPACE
+  labels:
+    test: performance
+spec:
+  replicas: $replicas
+  selector:
+    matchLabels:
+      app: $TEST_DEPLOYMENT
+  template:
+    metadata:
+      labels:
+        app: $TEST_DEPLOYMENT
+        spiffe.io/spire-managed-identity: "true"
+        test-replica-count: "$replicas"
+    spec:
+      serviceAccountName: test-workload-sa
+      containers:
+        - name: test
+          image: k8s.gcr.io/pause:3.9
+          resources:
+            requests:
+              memory: "4Mi"
+              cpu: "1m"
+            limits:
+              memory: "8Mi"
+              cpu: "2m"
+          volumeMounts:
+            - name: spire-svids
+              mountPath: "/run/spire"
+              readOnly: true
+      volumes:
+        - name: spire-svids
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: "spire"
+EOF
+}
+
+cleanup_test_namespace() {
+    print_info "Cleaning up test namespace..."
+    kubectl --context "$WORKLOAD_CONTEXT" delete namespace "$TEST_NAMESPACE" --ignore-not-found=true --wait=false
+
+    local max_wait=60
+    local elapsed=0
+    while kubectl --context "$WORKLOAD_CONTEXT" get namespace "$TEST_NAMESPACE" &>/dev/null; do
+        if [ $elapsed -ge $max_wait ]; then
+            print_warning "Namespace deletion timed out after ${max_wait}s"
+            break
+        fi
+        sleep 2
+        elapsed=$((elapsed + 2))
+    done
+}
+
+get_pod_status_distribution() {
+    kubectl --context "$WORKLOAD_CONTEXT" get pods -n "$TEST_NAMESPACE" \
+        -l app="$TEST_DEPLOYMENT" --no-headers 2>/dev/null | \
+        awk '{print $3}' | sort | uniq -c | \
+        awk '{printf "%d %s, ", $1, $2}' | sed 's/, $//'
+}
+
+calculate_percentile() {
+    local percentile=$1
+    local sorted_file=$2
+
+    local count=$(wc -l < "$sorted_file" 2>/dev/null || echo "0")
+    if [ "$count" = "0" ]; then
+        echo "0"
+        return
+    fi
+
+    local index=$(echo "($count * $percentile / 100) + 0.5" | bc 2>/dev/null || echo "1")
+    index=${index%%.*}
+    if [ "$index" -lt 1 ]; then
+        index=1
+    fi
+
+    sed -n "${index}p" "$sorted_file" 2>/dev/null || echo "0"
+}
+
+# Fixed measure_pod_times_with_status function
+measure_pod_times_with_status() {
+    local replicas=$1
+    local deployment_start=$(date +%s)
+
+    print_info "Measuring pod creation and startup times for $replicas replicas..."
+
+    > "$POD_TIMES_FILE"
+    > "$POD_TRACKING_FILE"
+
+    local running_count=0
+    local max_wait=300
+    local check_interval=1
+    local elapsed=0
+
+    # Record deployment creation time for all pods
+    local deployment_epoch=$deployment_start
+
+    while true; do
+        local status_dist=$(get_pod_status_distribution)
+
+        # Get all pods and process them
+        kubectl --context "$WORKLOAD_CONTEXT" get pods -n "$TEST_NAMESPACE" \
+            -l app="$TEST_DEPLOYMENT" --no-headers 2>/dev/null | while read line; do
+
+            local pod_name=$(echo "$line" | awk '{print $1}')
+            local ready=$(echo "$line" | awk '{print $2}')
+            local pod_status=$(echo "$line" | awk '{print $3}')
+
+            # Track new pods
+            if ! grep -q "^${pod_name}|" "$POD_TRACKING_FILE" 2>/dev/null; then
+                echo "${pod_name}|pending|${deployment_epoch}" >> "$POD_TRACKING_FILE"
+            fi
+
+            # Check if pod is ready and we haven't recorded its time
+            if [ "$pod_status" = "Running" ] && [ "$ready" = "1/1" ]; then
+                if ! grep -q "^${pod_name}|running|" "$POD_TRACKING_FILE" 2>/dev/null; then
+                    # Pod is now running, calculate time since deployment
+                    local current_time=$(date +%s)
+                    local startup_time=$((current_time - deployment_epoch))
+
+                    # Update tracking
+                    sed -i.bak "/^${pod_name}|/d" "$POD_TRACKING_FILE" 2>/dev/null
+                    echo "${pod_name}|running|${startup_time}" >> "$POD_TRACKING_FILE"
+                    echo "$startup_time" >> "$POD_TIMES_FILE"
+                fi
+            fi
+        done
+
+        running_count=$(kubectl --context "$WORKLOAD_CONTEXT" get pods -n "$TEST_NAMESPACE" \
+            -l app="$TEST_DEPLOYMENT" --no-headers 2>/dev/null | \
+            awk '$3=="Running" && $2=="1/1" {count++} END {print count+0}')
+
+        running_count=${running_count:-0}
+
+        local pods_with_times=$(wc -l < "$POD_TIMES_FILE" 2>/dev/null | tr -d ' ')
+        pods_with_times=${pods_with_times:-0}
+        echo -ne "\r  [${elapsed}s] Running: $running_count/$replicas | Timed: $pods_with_times | Status: $status_dist    " >&2
+
+        if [ "$running_count" -ge "$replicas" ] || [ "$elapsed" -ge "$max_wait" ]; then
+            break
+        fi
+
+        sleep $check_interval
+        elapsed=$((elapsed + check_interval))
+    done
+
+    echo "" >&2
+
+    if [ "$running_count" -ge "$replicas" ]; then
+        print_success "All $replicas pods are running in ${elapsed}s"
+    else
+        print_failure "Only $running_count/$replicas pods became running in ${max_wait}s"
+    fi
+
+    local avg_time="0"
+    local min_time="0"
+    local max_time="0"
+    local p50="0"
+    local p90="0"
+    local p99="0"
+    local pod_count=0
+
+    if [ -s "$POD_TIMES_FILE" ]; then
+        sort -n "$POD_TIMES_FILE" > "${POD_TIMES_FILE}.sorted"
+
+        pod_count=$(wc -l < "$POD_TIMES_FILE" | tr -d ' ')
+        min_time=$(head -1 "${POD_TIMES_FILE}.sorted" 2>/dev/null || echo "0")
+        max_time=$(tail -1 "${POD_TIMES_FILE}.sorted" 2>/dev/null || echo "0")
+        avg_time=$(awk '{sum+=$1} END {if(NR>0) printf "%.2f", sum/NR; else print "0"}' "$POD_TIMES_FILE" 2>/dev/null || echo "0")
+        p50=$(calculate_percentile 50 "${POD_TIMES_FILE}.sorted")
+        p90=$(calculate_percentile 90 "${POD_TIMES_FILE}.sorted")
+        p99=$(calculate_percentile 99 "${POD_TIMES_FILE}.sorted")
+
+        print_info "Collected timing data for $pod_count/$replicas pods"
+        if [ "$pod_count" -gt 0 ]; then
+            print_info "Startup time distribution: Min=${min_time}s, P50=${p50}s, P90=${p90}s, Max=${max_time}s"
+
+            if [ "$pod_count" -gt 5 ]; then
+                print_info "Time distribution (5-second buckets):"
+                awk '{
+                    bucket = int($1/5)*5
+                    buckets[bucket]++
+                }
+                END {
+                    for (b in buckets) {
+                        printf "    %3d-%3ds: %d pods\n", b, b+4, buckets[b]
+                    }
+                }' "$POD_TIMES_FILE" | sort -n >&2
+            fi
+        fi
+    else
+        print_warning "No pod timing data collected!"
+    fi
+
+    echo "${elapsed}|${avg_time}|${min_time}|${max_time}|${p50}|${p90}|${p99}"
+}
+
+measure_csi_mounts() {
+    local replicas=$1
+
+    print_info "Checking CSI volume mount status for $replicas replicas..."
+
+    local mounted_count=0
+    local failed_mounts=0
+    local pending_mounts=0
+
+    local running_pods=$(kubectl --context "$WORKLOAD_CONTEXT" get pods -n "$TEST_NAMESPACE" \
+        -l app="$TEST_DEPLOYMENT" --no-headers 2>/dev/null | \
+        awk '$3=="Running" && $2=="1/1" {count++} END {print count+0}')
+
+    local container_creating=$(kubectl --context "$WORKLOAD_CONTEXT" get pods -n "$TEST_NAMESPACE" \
+        -l app="$TEST_DEPLOYMENT" --no-headers 2>/dev/null | \
+        awk '$3=="ContainerCreating" {count++} END {print count+0}')
+
+    local volume_errors=$(kubectl --context "$WORKLOAD_CONTEXT" get events \
+        -n "$TEST_NAMESPACE" --no-headers 2>/dev/null | \
+        grep -i "volume\|mount\|csi\|secret" | \
+        grep -i "failed\|error\|timeout" | wc -l || echo "0")
+
+    if [ "$volume_errors" -gt 0 ]; then
+        print_warning "Found $volume_errors volume-related error events. Sample:"
+        kubectl --context "$WORKLOAD_CONTEXT" get events \
+            -n "$TEST_NAMESPACE" --no-headers 2>/dev/null | \
+            grep -i "volume\|mount\|csi\|secret" | \
+            grep -i "failed\|error\|timeout" | \
+            head -3 | while read line; do
+                echo "    $line" >&2
+            done
+    fi
+
+    mounted_count=${running_pods:-0}
+    failed_mounts=${volume_errors:-0}
+    pending_mounts=${container_creating:-0}
+
+    print_metric "Successful CSI mounts" "$mounted_count"
+    print_metric "Pending CSI mounts" "$pending_mounts"
+    print_metric "Failed mount events" "$failed_mounts"
+
+    echo "${mounted_count},${failed_mounts}"
+}
+
+get_csi_metrics() {
+    print_info "Collecting CSI driver metrics..."
+
+    local csi_pods=0
+
+    for ds_name in "csi-secrets-store" "secrets-store-csi-driver"; do
+        local count=$(kubectl --context "$WORKLOAD_CONTEXT" get pods -n kube-system \
+            -o wide --no-headers 2>/dev/null | \
+            grep "$ds_name" | wc -l)
+        if [ "$count" -gt 0 ]; then
+            csi_pods=$count
+            break
+        fi
+    done
+
+    local provider_pods=0
+    for ns in csi spire-system spire; do
+        for label in "app=spire-csi-provider" "app=spire-csi-driver"; do
+            local count=$(kubectl --context "$WORKLOAD_CONTEXT" get pods -n "$ns" \
+                -l "$label" --no-headers 2>/dev/null | wc -l)
+            if [ "$count" -gt 0 ]; then
+                provider_pods=$count
+                break 2
+            fi
+        done
+    done
+
+    local csi_errors=0
+    local provider_errors=0
+
+    if [ "$csi_pods" -gt 0 ]; then
+        csi_errors=$(kubectl --context "$WORKLOAD_CONTEXT" get pods -n kube-system \
+            -o name 2>/dev/null | \
+            grep -E "(csi-secrets-store|secrets-store)" | \
+            xargs -I {} kubectl --context "$WORKLOAD_CONTEXT" logs {} -n kube-system \
+            --tail=100 --since=5m 2>/dev/null | \
+            grep -c "ERROR\|error\|Error" || echo "0")
+    fi
+
+    if [ "$provider_pods" -gt 0 ]; then
+        provider_errors=$(kubectl --context "$WORKLOAD_CONTEXT" logs -n csi \
+            -l app=spire-csi-provider --tail=100 --since=5m 2>/dev/null | \
+            grep -c "ERROR\|error\|Error" || echo "0")
+    fi
+
+    print_metric "CSI driver pods" "$csi_pods"
+    print_metric "SPIRE CSI provider pods" "$provider_pods"
+    print_metric "CSI driver errors (last 5m)" "$csi_errors"
+    print_metric "SPIRE provider errors (last 5m)" "$provider_errors"
+
+    echo "${csi_pods},${provider_pods},${csi_errors},${provider_errors}"
+}
+
+safe_divide() {
+    local numerator="${1:-0}"
+    local denominator="${2:-1}"
+    local scale="${3:-2}"
+
+    numerator=$(echo "$numerator" | grep -o '[0-9.]*' | head -1)
+    denominator=$(echo "$denominator" | grep -o '[0-9.]*' | head -1)
+
+    numerator=${numerator:-0}
+    denominator=${denominator:-1}
+
+    if [ "$denominator" = "0" ]; then
+        echo "0"
+        return
+    fi
+
+    echo "scale=$scale; $numerator / $denominator" | bc 2>/dev/null || echo "0"
+}
+
+run_perf_test() {
+    local replicas=$1
+    local test_num=$2
+
+    print_test "Performance Test #$test_num: $replicas Replicas"
+
+    local start_time=$(date +%s)
+
+    print_info "Deploying workload with $replicas replicas..."
+    create_perf_deployment "$replicas" | kubectl --context "$WORKLOAD_CONTEXT" apply -f -
+
+    sleep 2
+
+    local pod_metrics=$(measure_pod_times_with_status "$replicas")
+
+    local total_time=$(echo "$pod_metrics" | cut -d'|' -f1)
+    local avg_time=$(echo "$pod_metrics" | cut -d'|' -f2)
+    local min_time=$(echo "$pod_metrics" | cut -d'|' -f3)
+    local max_time=$(echo "$pod_metrics" | cut -d'|' -f4)
+    local p50_time=$(echo "$pod_metrics" | cut -d'|' -f5)
+    local p90_time=$(echo "$pod_metrics" | cut -d'|' -f6)
+    local p99_time=$(echo "$pod_metrics" | cut -d'|' -f7)
+
+    mount_metrics=$(measure_csi_mounts "$replicas" | tail -1)
+    successful_mounts=$(echo "$mount_metrics" | cut -d',' -f1)
+    failed_mounts=$(echo "$mount_metrics" | cut -d',' -f2)
+    successful_mounts=${successful_mounts:-0}
+    failed_mounts=${failed_mounts:-0}
+
+    csi_metrics=$(get_csi_metrics | tail -1)
+    csi_pods=$(echo "$csi_metrics" | cut -d',' -f1)
+    provider_pods=$(echo "$csi_metrics" | cut -d',' -f2)
+    csi_errors=$(echo "$csi_metrics" | cut -d',' -f3)
+    provider_errors=$(echo "$csi_metrics" | cut -d',' -f4)
+
+    csi_pods=${csi_pods:-0}
+    provider_pods=${provider_pods:-0}
+    csi_errors=${csi_errors:-0}
+    provider_errors=${provider_errors:-0}
+
+    local end_time=$(date +%s)
+    local test_total_time=$((end_time - start_time))
+
+    mount_rate=$(safe_divide "$successful_mounts" "$replicas" 1)
+    mount_rate=$(echo "$mount_rate * 100" | bc 2>/dev/null || echo "0")
+
+    echo "" >&2
+    echo "Performance Results for $replicas Replicas:" >&2
+    echo "===========================================" >&2
+    print_metric "Total test time" "${test_total_time}s"
+    print_metric "Time to all pods running" "${total_time}s"
+    echo "" >&2
+    echo "  Pod Startup Time Statistics:" >&2
+    print_metric "  Average" "${avg_time}s"
+    print_metric "  Minimum" "${min_time}s"
+    print_metric "  P50 (Median)" "${p50_time}s"
+    print_metric "  P90" "${p90_time}s"
+    print_metric "  P99" "${p99_time}s"
+    print_metric "  Maximum" "${max_time}s"
+    echo "" >&2
+    print_metric "Successful CSI mounts" "$successful_mounts"
+    print_metric "Failed CSI mounts" "$failed_mounts"
+    print_metric "Mount success rate" "${mount_rate}%"
+    print_metric "CSI/Provider errors" "${csi_errors}/${provider_errors}"
+
+    if [ "$EXPORT_RESULTS" = true ]; then
+        cat >> "$RESULTS_FILE" <<EOF
+{
+  "test_number": $test_num,
+  "replicas": $replicas,
+  "timestamp": "$(date -Iseconds)",
+  "total_test_time_seconds": $test_total_time,
+  "all_pods_running_time_seconds": ${total_time:-0},
+  "avg_startup_time": ${avg_time:-0},
+  "min_startup_time": ${min_time:-0},
+  "max_startup_time": ${max_time:-0},
+  "p50_startup_time": ${p50_time:-0},
+  "p90_startup_time": ${p90_time:-0},
+  "p99_startup_time": ${p99_time:-0},
+  "successful_mounts": $successful_mounts,
+  "failed_mounts": $failed_mounts,
+  "mount_success_rate": ${mount_rate:-0},
+  "csi_driver_pods": ${csi_pods:-0},
+  "provider_pods": ${provider_pods:-0},
+  "csi_errors": ${csi_errors:-0},
+  "provider_errors": ${provider_errors:-0}
+},
+EOF
+    fi
+
+    rm -f "$POD_TIMES_FILE" "${POD_TIMES_FILE}.sorted" "${POD_TIMES_FILE}.tracked" "$POD_TRACKING_FILE" "${POD_TRACKING_FILE}.bak"
+
+    if [ "$CLEANUP_BETWEEN_TESTS" = true ]; then
+        cleanup_test_namespace
+    fi
+}
+
+pre_test_validation() {
+    print_test "Pre-Test Validation"
+
+    if ! kubectl --context "$WORKLOAD_CONTEXT" cluster-info &>/dev/null; then
+        print_failure "Cannot access workload cluster"
+        exit 1
+    fi
+    print_success "Workload cluster accessible"
+
+    local csi_driver_exists=0
+    local csi_driver_name=""
+
+    for ds_name in "csi-secrets-store" "secrets-store-csi-driver"; do
+        if kubectl --context "$WORKLOAD_CONTEXT" get daemonset "$ds_name" -n kube-system &>/dev/null; then
+            csi_driver_exists=1
+            csi_driver_name="$ds_name"
+            break
+        fi
+    done
+
+    if [ "$csi_driver_exists" -eq 0 ]; then
+        print_failure "CSI driver DaemonSet not found in kube-system"
+        exit 1
+    else
+        print_success "Found CSI driver DaemonSet: $csi_driver_name"
+
+        local node_count=$(kubectl --context "$WORKLOAD_CONTEXT" get nodes --no-headers 2>/dev/null | wc -l)
+        local csi_running=$(kubectl --context "$WORKLOAD_CONTEXT" get pods -n kube-system \
+            -o wide --no-headers 2>/dev/null | \
+            grep "$csi_driver_name" | \
+            awk '$3=="Running" {count++} END {print count+0}')
+
+        if [ "$csi_running" -lt "$node_count" ]; then
+            print_warning "CSI driver not running on all nodes ($csi_running/$node_count)"
+        else
+            print_success "CSI driver running on all nodes ($csi_running/$node_count)"
+        fi
+    fi
+
+    local provider_running=$(kubectl --context "$WORKLOAD_CONTEXT" get pods -n csi \
+        --no-headers 2>/dev/null | \
+        grep -E "(spire-csi-provider|spire-csi-driver)" | \
+        awk '$3=="Running" {count++} END {print count+0}')
+
+    if [ "$provider_running" -gt 0 ]; then
+        print_success "SPIRE CSI provider is running ($provider_running pods)"
+    else
+        print_warning "SPIRE CSI provider may not be running"
+    fi
+
+    print_info "Checking CSI driver registration..."
+    local csi_nodes=$(kubectl --context "$WORKLOAD_CONTEXT" get csinodes --no-headers 2>/dev/null | wc -l)
+    if [ "$csi_nodes" -gt 0 ]; then
+        print_success "CSI nodes registered: $csi_nodes"
+    fi
+
+    cleanup_test_namespace
+}
+
+generate_summary() {
+    if [ "$EXPORT_RESULTS" != true ]; then
+        return
+    fi
+
+    print_test "Generating Summary Report"
+
+    cat > "$SUMMARY_FILE" <<EOF
+SPIRE CSI Provider Performance Test Summary
+==========================================
+Test Date: $(date)
+Test Configuration:
+  - Replica counts tested: ${REPLICA_COUNTS[*]}
+  - Sequential mode: $SEQUENTIAL_MODE
+  - Pod resources: 1m CPU, 4Mi memory (minimal)
+
+Performance Results:
+EOF
+
+    if [ -f "$RESULTS_FILE" ]; then
+        # Fix for macOS sed - use portable approach
+        # Remove trailing comma
+        if [ "$(tail -c 2 "$RESULTS_FILE")" = "," ]; then
+            truncate -s -2 "$RESULTS_FILE" 2>/dev/null || \
+            head -c -2 "$RESULTS_FILE" > "${RESULTS_FILE}.tmp" && mv "${RESULTS_FILE}.tmp" "$RESULTS_FILE"
+        fi
+
+        # Add closing bracket
+        echo "]" >> "$RESULTS_FILE"
+
+        # Add opening bracket at beginning
+        echo "[" > "${RESULTS_FILE}.tmp"
+        cat "$RESULTS_FILE" >> "${RESULTS_FILE}.tmp"
+        mv "${RESULTS_FILE}.tmp" "$RESULTS_FILE"
+
+        if command -v jq &>/dev/null; then
+            jq -r '.[] | "Replicas: \(.replicas) - Avg: \(.avg_startup_time)s, P50: \(.p50_startup_time)s, P90: \(.p90_startup_time)s, P99: \(.p99_startup_time)s, Max: \(.max_startup_time)s, Mount Success: \(.mount_success_rate)%"' \
+                "$RESULTS_FILE" >> "$SUMMARY_FILE"
+        fi
+    fi
+
+    echo "" >> "$SUMMARY_FILE"
+
+    print_success "Results exported to $RESULTS_DIR/"
+}
+
+main() {
+    echo "Starting performance tests with minimal pod resources..." >&2
+    echo "" >&2
+
+    pre_test_validation
+
+    if [ "$EXPORT_RESULTS" = true ]; then
+        echo "" > "$RESULTS_FILE"
+    fi
+
+    local test_num=1
+    for replicas in "${REPLICA_COUNTS[@]}"; do
+        run_perf_test "$replicas" "$test_num"
+        test_num=$((test_num + 1))
+
+        if [ $test_num -le ${#REPLICA_COUNTS[@]} ] && [ "$CLEANUP_BETWEEN_TESTS" = true ]; then
+            print_info "Waiting 10s before next test..."
+            sleep 10
+        fi
+    done
+
+    generate_summary
+
+    if [ "$CLEANUP_BETWEEN_TESTS" = false ]; then
+        print_info "Cleaning up test resources..."
+        cleanup_test_namespace
+    fi
+
+    echo "" >&2
+    echo -e "${CYAN}========================================${NC}" >&2
+    echo -e "${CYAN}Performance Testing Complete${NC}" >&2
+    echo -e "${CYAN}========================================${NC}" >&2
+
+    if [ "$EXPORT_RESULTS" = true ]; then
+        echo "" >&2
+        echo "Results saved to:" >&2
+        echo "  JSON: $RESULTS_FILE" >&2
+        echo "  Summary: $SUMMARY_FILE" >&2
+    fi
+}
+
+cleanup_on_exit() {
+    print_warning "Test interrupted, cleaning up..."
+    cleanup_test_namespace
+    rm -f "$POD_TIMES_FILE" "${POD_TIMES_FILE}.sorted" "${POD_TIMES_FILE}.tracked" "$POD_TRACKING_FILE" "${POD_TRACKING_FILE}.bak"
+}
+
+trap cleanup_on_exit EXIT INT TERM
+
+main "$@"

@@ -53,10 +53,15 @@ spec:
     spec:
       serviceAccountName: test-workload-sa-a
       containers:
-        - name: alpine
-          image: alpine:3.19
-          imagePullPolicy: Never
-          command: ["sh", "-c", "sleep 1000000"]
+        - name: test
+          image: k8s.gcr.io/pause:3.9
+          resources:
+            requests:
+              memory: "4Mi"
+              cpu: "1m"
+            limits:
+              memory: "8Mi"
+              cpu: "2m"
           volumeMounts:
             - name: spire-svids
               mountPath: "/run/spire"

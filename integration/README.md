@@ -133,6 +133,135 @@ Check SecretProviderClass:
 kubectl --context kind-workload get secretproviderclass -A
 ```
 
+## Performance Testing
+
+The repository includes a performance testing for evaluating the SPIRE CSI Provider under various load conditions. The test suite measures pod startup times, CSI mount success rates, and system resource utilization across different replica counts.
+
+### Running Performance Tests
+
+#### Quick Start
+
+Run the default performance test:
+```bash
+cd scripts
+./perf-test.sh
+```
+
+This will test with default replica counts (50, 100, 150, 200) and export results to `scripts/perf-results/`.
+
+#### Custom Test Configurations
+
+```bash
+# Test with custom replica counts
+./perf-test.sh --replicas 10,25,50,75
+
+# Deploy pods sequentially (one-by-one) instead of all at once
+./perf-test.sh --sequential
+
+# Keep deployments between tests (no cleanup)
+./perf-test.sh --no-cleanup
+
+# Combine options
+./perf-test.sh --replicas 25,50,100 --sequential --no-cleanup
+
+# Check CSI component status before testing
+./perf-test.sh --check-csi
+```
+
+### Test Parameters
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `--replicas N,N,N` | Comma-separated replica counts to test | 50,100,150,200 |
+| `--sequential` | Deploy pods one-by-one instead of parallel | false |
+| `--no-cleanup` | Don't cleanup between different replica tests | false |
+| `--no-export` | Don't export results to file | false |
+| `--check-csi` | Check CSI component status and exit | - |
+
+### Metrics Collected
+
+The performance test collects comprehensive metrics for each test run:
+
+#### Pod Startup Metrics
+- **Total time to all pods running**: Time for all replicas to reach Running state
+- **Individual pod startup times**: Time from deployment to each pod becoming ready
+- **Statistical distribution**:
+    - Average, Minimum, Maximum startup times
+    - P50 (Median), P90, P99 percentiles
+    - Time distribution in 5-second buckets
+
+#### CSI Mount Metrics
+- **Successful mounts**: Number of pods with successfully mounted CSI volumes
+- **Failed mounts**: Number of volume mount failures
+- **Mount success rate**: Percentage of successful mounts
+- **Volume-related events**: Errors and warnings from CSI operations
+
+#### System Metrics
+- **CSI driver pods**: Number of CSI driver pods running
+- **SPIRE provider pods**: Number of SPIRE CSI provider pods
+- **Error counts**: CSI driver and provider errors in the last 5 minutes
+
+### Test Output
+
+#### Console Output
+The test provides real-time feedback during execution:
+```
+[INFO] Measuring pod creation and startup times for 50 replicas...
+  [45s] Running: 50/50 | Timed: 50 | Status: 50 Running
+[PASS] All 50 pods are running in 45s
+
+Performance Results for 50 Replicas:
+===========================================
+  Total test time: 48s
+  Time to all pods running: 45s
+  
+  Pod Startup Time Statistics:
+    Average: 12.5s
+    Minimum: 3s
+    P50 (Median): 11s
+    P90: 22s
+    P99: 41s
+    Maximum: 43s
+    
+  Successful CSI mounts: 50
+  Failed CSI mounts: 0
+  Mount success rate: 100%
+  CSI/Provider errors: 0/0
+```
+
+#### Exported Results
+
+Results are saved in two formats:
+
+1. **JSON Results** (`perf_test_TIMESTAMP.json`):
+```json
+{
+  "test_number": 1,
+  "replicas": 50,
+  "timestamp": "2024-03-15T10:30:00Z",
+  "total_test_time_seconds": 48,
+  "all_pods_running_time_seconds": 45,
+  "avg_startup_time": 12.5,
+  "min_startup_time": 3,
+  "max_startup_time": 43,
+  "p50_startup_time": 11,
+  "p90_startup_time": 22,
+  "p99_startup_time": 41,
+  "successful_mounts": 50,
+  "failed_mounts": 0,
+  "mount_success_rate": 100,
+  "csi_driver_pods": 3,
+  "provider_pods": 3,
+  "csi_errors": 0,
+  "provider_errors": 0
+}
+```
+
+2. **Summary Report** (`perf_summary_TIMESTAMP.txt`):
+    - Consolidated view of all test runs
+    - Key metrics comparison across replica counts
+    - Test configuration details
+
 ## Cleanup
 
 Remove all resources:

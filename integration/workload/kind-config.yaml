@@ -3,6 +3,27 @@ apiVersion: kind.x-k8s.io/v1alpha4
 name: workload
 networking:
   kubeProxyMode: "ipvs"
+  podSubnet: "10.244.0.0/16"
+  serviceSubnet: "10.96.0.0/12"
 nodes:
-- role: control-plane
-- role: worker
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            max-pods: "110"
+      - |
+        kind: ClusterConfiguration
+        controllerManager:
+          extraArgs:
+            node-cidr-mask-size: "22"
+  - role: worker
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            max-pods: "600"
+            pods-per-core: "0"
+            max-open-files: "1000000"
