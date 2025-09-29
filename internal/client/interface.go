@@ -33,6 +33,9 @@ type SpireClient interface {
 	// GetTrustBundle returns the current trust bundle
 	GetTrustBundle() (*x509.CertPool, error)
 
+	// GetBundlesByDomain returns all bundles separated by domain
+	GetBundlesByDomain(ctx context.Context) (map[string][]*x509.Certificate, error)
+
 	// Status returns the connection status
 	Status() (bool, string)
 }

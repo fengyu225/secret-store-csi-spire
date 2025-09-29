@@ -169,6 +169,23 @@ func (c *Client) GetTrustBundle() (*x509.CertPool, error) {
 	return c.bundleManager.getTrustBundle()
 }
 
+func (c *Client) GetBundlesByDomain(ctx context.Context) (map[string][]*x509.Certificate, error) {
+	if err := c.ensureConnection(ctx); err != nil {
+		return nil, err
+	}
+
+	c.bundleManager.mu.RLock()
+	defer c.bundleManager.mu.RUnlock()
+
+	// Return a copy of the parsed certs map
+	result := make(map[string][]*x509.Certificate)
+	for domain, certs := range c.bundleManager.parsedCerts {
+		result[domain] = certs
+	}
+
+	return result, nil
+}
+
 // fetchJWTSVIDFromAgent fetches a JWT SVID from the SPIRE agent
 func (c *Client) fetchJWTSVIDFromAgent(ctx context.Context, audiences []string) (string, time.Time, error) {
 	c.logger.Info("fetching JWT-SVID from SPIRE agent", "audiences", audiences)

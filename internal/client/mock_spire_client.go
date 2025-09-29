@@ -52,6 +52,21 @@ func (mr *MockSpireClientMockRecorder) FetchJWTSVID(ctx, spiffeID, audiences int
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FetchJWTSVID", reflect.TypeOf((*MockSpireClient)(nil).FetchJWTSVID), ctx, spiffeID, audiences)
 }
 
+// GetBundlesByDomain mocks base method.
+func (m *MockSpireClient) GetBundlesByDomain(ctx context.Context) (map[string][]*x509.Certificate, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetBundlesByDomain", ctx)
+	ret0, _ := ret[0].(map[string][]*x509.Certificate)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetBundlesByDomain indicates an expected call of GetBundlesByDomain.
+func (mr *MockSpireClientMockRecorder) GetBundlesByDomain(ctx interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetBundlesByDomain", reflect.TypeOf((*MockSpireClient)(nil).GetBundlesByDomain), ctx)
+}
+
 // GetCACertificates mocks base method.
 func (m *MockSpireClient) GetCACertificates(ctx context.Context) ([]*x509.Certificate, error) {
 	m.ctrl.T.Helper()

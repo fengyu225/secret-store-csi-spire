@@ -1331,6 +1331,533 @@ func TestConvertConfigSelectorsToAPISelectors(t *testing.T) {
 	}
 }
 
+func TestFetchX509SVID_FederatedBundles(t *testing.T) {
+	tests := []struct {
+		name                 string
+		includeFederated     bool
+		mergeFederatedBundle bool
+		bundlesByDomain      map[string][]*x509.Certificate
+		getBundlesError      error
+		expectFiles          map[string]bool
+		fallbackToRegular    bool
+		verifyCertCount      map[string]int
+	}{
+		{
+			name:             "federated disabled",
+			includeFederated: false,
+			expectFiles: map[string]bool{
+				"/cert.pem":   true,
+				"/key.pem":    true,
+				"/bundle.pem": true,
+			},
+			verifyCertCount: map[string]int{
+				"/bundle.pem": 1,
+			},
+		},
+		{
+			name:                 "federated enabled - merged bundles",
+			includeFederated:     true,
+			mergeFederatedBundle: true,
+			bundlesByDomain: map[string][]*x509.Certificate{
+				"example.org":    {generateTestCACertificate(t)},
+				"federated1.com": {generateTestCACertificate(t)},
+				"federated2.com": {generateTestCACertificate(t), generateTestCACertificate(t)},
+			},
+			expectFiles: map[string]bool{
+				"/cert.pem":   true,
+				"/key.pem":    true,
+				"/bundle.pem": true,
+			},
+			verifyCertCount: map[string]int{
+				"/bundle.pem": 4,
+			},
+		},
+		{
+			name:                 "federated enabled - separate bundles",
+			includeFederated:     true,
+			mergeFederatedBundle: false,
+			bundlesByDomain: map[string][]*x509.Certificate{
+				"example.org":    {generateTestCACertificate(t)},
+				"federated1.com": {generateTestCACertificate(t)},
+				"federated2.com": {generateTestCACertificate(t)},
+			},
+			expectFiles: map[string]bool{
+				"/cert.pem":                  true,
+				"/key.pem":                   true,
+				"/bundle.pem":                true,
+				"/federated1_com-bundle.pem": true,
+				"/federated2_com-bundle.pem": true,
+			},
+			verifyCertCount: map[string]int{
+				"/bundle.pem":                1,
+				"/federated1_com-bundle.pem": 1,
+				"/federated2_com-bundle.pem": 1,
+			},
+		},
+		{
+			name:                 "federated enabled - main domain with spiffe prefix",
+			includeFederated:     true,
+			mergeFederatedBundle: false,
+			bundlesByDomain: map[string][]*x509.Certificate{
+				"spiffe://example.org": {generateTestCACertificate(t)},
+				"partner.com":          {generateTestCACertificate(t)},
+			},
+			expectFiles: map[string]bool{
+				"/cert.pem":               true,
+				"/key.pem":                true,
+				"/bundle.pem":             true,
+				"/partner_com-bundle.pem": true,
+			},
+			verifyCertCount: map[string]int{
+				"/bundle.pem":             1,
+				"/partner_com-bundle.pem": 1,
+			},
+		},
+		{
+			name:                 "federated enabled - empty main domain key",
+			includeFederated:     true,
+			mergeFederatedBundle: false,
+			bundlesByDomain: map[string][]*x509.Certificate{
+				"":              {generateTestCACertificate(t)},
+				"federated.com": {generateTestCACertificate(t)},
+			},
+			expectFiles: map[string]bool{
+				"/cert.pem":                 true,
+				"/key.pem":                  true,
+				"/bundle.pem":               true,
+				"/federated_com-bundle.pem": true,
+			},
+			verifyCertCount: map[string]int{
+				"/bundle.pem":               1,
+				"/federated_com-bundle.pem": 1,
+			},
+		},
+		{
+			name:                 "federated enabled - no main domain in map",
+			includeFederated:     true,
+			mergeFederatedBundle: false,
+			bundlesByDomain: map[string][]*x509.Certificate{
+				"other1.com": {generateTestCACertificate(t)},
+				"other2.com": {generateTestCACertificate(t)},
+			},
+			expectFiles: map[string]bool{
+				"/cert.pem":              true,
+				"/key.pem":               true,
+				"/bundle.pem":            true,
+				"/other1_com-bundle.pem": true,
+				"/other2_com-bundle.pem": true,
+			},
+			fallbackToRegular: true,
+			verifyCertCount: map[string]int{
+				"/bundle.pem":            1,
+				"/other1_com-bundle.pem": 1,
+				"/other2_com-bundle.pem": 1,
+			},
+		},
+		{
+			name:             "federated enabled - GetBundlesByDomain error",
+			includeFederated: true,
+			getBundlesError:  errors.New("failed to get bundles"),
+			expectFiles: map[string]bool{
+				"/cert.pem":   true,
+				"/key.pem":    true,
+				"/bundle.pem": true,
+			},
+			fallbackToRegular: true,
+			verifyCertCount: map[string]int{
+				"/bundle.pem": 1,
+			},
+		},
+		{
+			name:                 "federated enabled - domain with no certificates",
+			includeFederated:     true,
+			mergeFederatedBundle: false,
+			bundlesByDomain: map[string][]*x509.Certificate{
+				"example.org": {generateTestCACertificate(t)},
+				"empty.com":   {},
+			},
+			expectFiles: map[string]bool{
+				"/cert.pem":   true,
+				"/key.pem":    true,
+				"/bundle.pem": true,
+			},
+			verifyCertCount: map[string]int{
+				"/bundle.pem": 1,
+			},
+		},
+		{
+			name:                 "federated enabled - complex domain normalization",
+			includeFederated:     true,
+			mergeFederatedBundle: false,
+			bundlesByDomain: map[string][]*x509.Certificate{
+				"example.org":              {generateTestCACertificate(t)},
+				"spiffe://test.domain.com": {generateTestCACertificate(t)},
+				"sub.domain:8080":          {generateTestCACertificate(t)},
+			},
+			expectFiles: map[string]bool{
+				"/cert.pem":                   true,
+				"/key.pem":                    true,
+				"/bundle.pem":                 true,
+				"/test_domain_com-bundle.pem": true,
+				"/sub_domain_8080-bundle.pem": true,
+			},
+			verifyCertCount: map[string]int{
+				"/bundle.pem":                 1,
+				"/test_domain_com-bundle.pem": 1,
+				"/sub_domain_8080-bundle.pem": 1,
+			},
+		},
+		{
+			name:                 "federated enabled - merged with multiple certs per domain",
+			includeFederated:     true,
+			mergeFederatedBundle: true,
+			bundlesByDomain: map[string][]*x509.Certificate{
+				"example.org": {
+					generateTestCACertificate(t),
+					generateTestCACertificate(t),
+				},
+				"partner.com": {
+					generateTestCACertificate(t),
+					generateTestCACertificate(t),
+					generateTestCACertificate(t),
+				},
+			},
+			expectFiles: map[string]bool{
+				"/cert.pem":   true,
+				"/key.pem":    true,
+				"/bundle.pem": true,
+			},
+			verifyCertCount: map[string]int{
+				"/bundle.pem": 5,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			logger := hclog.NewNullLogger()
+			hmacGen := hmac.NewHMACGenerator([]byte("test"))
+			podContext := metrics.PodContext{}
+			provider := NewProviderWithContext(logger, hmacGen, podContext)
+
+			cert, key := generateTestCertificate(t)
+			tlsCert := &tls.Certificate{
+				Certificate: [][]byte{cert.Raw},
+				PrivateKey:  key,
+			}
+
+			mockClient := client.NewMockSpireClient(ctrl)
+			mockClient.EXPECT().GetCertificateForIdentity(gomock.Any()).Return(tlsCert, nil)
+
+			if tt.includeFederated {
+				mockClient.EXPECT().GetBundlesByDomain(gomock.Any()).Return(tt.bundlesByDomain, tt.getBundlesError)
+
+				if tt.getBundlesError != nil || (tt.fallbackToRegular && !tt.mergeFederatedBundle) {
+					// Expect fallback to GetCACertificates
+					mockClient.EXPECT().GetCACertificates(gomock.Any()).Return([]*x509.Certificate{generateTestCACertificate(t)}, nil)
+				}
+			} else {
+				// When not federated, always use GetCACertificates
+				mockClient.EXPECT().GetCACertificates(gomock.Any()).Return([]*x509.Certificate{generateTestCACertificate(t)}, nil)
+			}
+
+			object := config.Object{
+				ObjectName:           "test",
+				Type:                 "x509-svid",
+				Paths:                []string{"/cert.pem", "/key.pem", "/bundle.pem"},
+				IncludeFederated:     tt.includeFederated,
+				MergeFederatedBundle: tt.mergeFederatedBundle,
+			}
+
+			ctx := context.Background()
+			result, err := provider.fetchX509SVID(ctx, mockClient, object, "spiffe://example.org/ns/default/sa/test")
+
+			if err != nil {
+				t.Fatalf("Unexpected error: %v", err)
+			}
+
+			// Check that all expected files are present
+			for expectedPath := range tt.expectFiles {
+				if _, exists := result[expectedPath]; !exists {
+					t.Errorf("Expected file %s not found in result", expectedPath)
+				}
+			}
+
+			// Check no unexpected files
+			for resultPath := range result {
+				if !tt.expectFiles[resultPath] {
+					t.Errorf("Unexpected file %s in result", resultPath)
+				}
+			}
+
+			// Verify all files contain valid PEM data
+			for path, content := range result {
+				if strings.HasSuffix(path, "bundle.pem") || path == "/cert.pem" {
+					if !strings.Contains(string(content), "BEGIN CERTIFICATE") {
+						t.Errorf("File %s does not contain valid certificate PEM", path)
+					}
+				} else if path == "/key.pem" {
+					if !strings.Contains(string(content), "BEGIN PRIVATE KEY") {
+						t.Errorf("File %s does not contain valid private key PEM", path)
+					}
+				}
+			}
+
+			// Verify certificate counts in bundles
+			for path, expectedCount := range tt.verifyCertCount {
+				if content, exists := result[path]; exists {
+					certCount := strings.Count(string(content), "BEGIN CERTIFICATE")
+					if certCount != expectedCount {
+						t.Errorf("File %s: expected %d certificates, got %d", path, expectedCount, certCount)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestEncodeCertificates(t *testing.T) {
+	tests := []struct {
+		name      string
+		certCount int
+		expectPEM bool
+	}{
+		{
+			name:      "empty certificates",
+			certCount: 0,
+			expectPEM: false,
+		},
+		{
+			name:      "single certificate",
+			certCount: 1,
+			expectPEM: true,
+		},
+		{
+			name:      "multiple certificates",
+			certCount: 3,
+			expectPEM: true,
+		},
+		{
+			name:      "nil certificates",
+			certCount: -1,
+			expectPEM: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logger := hclog.NewNullLogger()
+			hmacGen := hmac.NewHMACGenerator([]byte("test"))
+			podContext := metrics.PodContext{}
+			provider := NewProviderWithContext(logger, hmacGen, podContext)
+
+			var certs []*x509.Certificate
+			if tt.certCount == -1 {
+				certs = nil
+			} else {
+				for i := 0; i < tt.certCount; i++ {
+					certs = append(certs, generateTestCACertificate(t))
+				}
+			}
+
+			result := provider.encodeCertificates(certs)
+
+			if tt.expectPEM {
+				certBlocks := strings.Count(string(result), "BEGIN CERTIFICATE")
+				if certBlocks != tt.certCount {
+					t.Errorf("Expected %d certificate blocks, got %d", tt.certCount, certBlocks)
+				}
+
+				// Verify each block ends properly
+				endBlocks := strings.Count(string(result), "END CERTIFICATE")
+				if endBlocks != tt.certCount {
+					t.Errorf("Expected %d END CERTIFICATE blocks, got %d", tt.certCount, endBlocks)
+				}
+			} else {
+				if len(result) != 0 {
+					t.Errorf("Expected empty result for %d certificates, got %d bytes", tt.certCount, len(result))
+				}
+			}
+		})
+	}
+}
+
+func TestExtractTrustDomain(t *testing.T) {
+	tests := []struct {
+		name     string
+		spiffeID string
+		want     string
+	}{
+		{
+			name:     "standard SPIFFE ID",
+			spiffeID: "spiffe://example.org/ns/default/sa/test",
+			want:     "example.org",
+		},
+		{
+			name:     "SPIFFE ID with subdomain",
+			spiffeID: "spiffe://sub.example.org/ns/prod/sa/api",
+			want:     "sub.example.org",
+		},
+		{
+			name:     "SPIFFE ID with port",
+			spiffeID: "spiffe://example.org:8080/ns/default/sa/test",
+			want:     "example.org:8080",
+		},
+		{
+			name:     "SPIFFE ID with minimal path",
+			spiffeID: "spiffe://example.org/workload",
+			want:     "example.org",
+		},
+		{
+			name:     "SPIFFE ID with no path",
+			spiffeID: "spiffe://example.org",
+			want:     "example.org",
+		},
+		{
+			name:     "SPIFFE ID with trailing slash",
+			spiffeID: "spiffe://example.org/",
+			want:     "example.org",
+		},
+		{
+			name:     "invalid - no spiffe prefix",
+			spiffeID: "example.org/ns/default/sa/test",
+			want:     "",
+		},
+		{
+			name:     "invalid - http prefix",
+			spiffeID: "http://example.org/ns/default/sa/test",
+			want:     "",
+		},
+		{
+			name:     "empty SPIFFE ID",
+			spiffeID: "",
+			want:     "",
+		},
+		{
+			name:     "just spiffe prefix",
+			spiffeID: "spiffe://",
+			want:     "",
+		},
+		{
+			name:     "SPIFFE ID with special characters in domain",
+			spiffeID: "spiffe://test-domain.example_org.com/ns/default",
+			want:     "test-domain.example_org.com",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logger := hclog.NewNullLogger()
+			hmacGen := hmac.NewHMACGenerator([]byte("test"))
+			podContext := metrics.PodContext{}
+			provider := NewProviderWithContext(logger, hmacGen, podContext)
+
+			got := provider.extractTrustDomain(tt.spiffeID)
+			if got != tt.want {
+				t.Errorf("extractTrustDomain(%q) = %q, want %q", tt.spiffeID, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHandleMountRequest_WithFederatedX509(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	logger := hclog.NewNullLogger()
+	hmacGen := hmac.NewHMACGenerator([]byte("test-key"))
+	podContext := metrics.PodContext{
+		Namespace:      "default",
+		ServiceAccount: "test-sa",
+		PodUID:         "123",
+		PodName:        "test-pod",
+	}
+
+	cert, key := generateTestCertificate(t)
+	tlsCert := &tls.Certificate{
+		Certificate: [][]byte{cert.Raw},
+		PrivateKey:  key,
+		Leaf:        cert,
+	}
+
+	mainCert := generateTestCACertificate(t)
+	partnerCert := generateTestCACertificate(t)
+
+	bundlesByDomain := map[string][]*x509.Certificate{
+		"example.org": {mainCert},
+		"partner.com": {partnerCert},
+	}
+
+	mockClient := client.NewMockSpireClient(ctrl)
+	mockClient.EXPECT().WaitForSVID(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
+	mockClient.EXPECT().WaitForTrustBundle(gomock.Any(), gomock.Any()).Return(nil)
+	mockClient.EXPECT().GetCertificateForIdentity(gomock.Any()).Return(tlsCert, nil)
+	mockClient.EXPECT().GetBundlesByDomain(gomock.Any()).Return(bundlesByDomain, nil)
+
+	mockPool := client.NewMockClientPoolInterface(ctrl)
+	mockPool.EXPECT().AcquireClient(gomock.Any(), gomock.Any()).Return(mockClient, nil)
+	mockPool.EXPECT().ReleaseClient(gomock.Any()).Return()
+
+	provider := NewProviderWithClientPool(logger, hmacGen, podContext, mockPool)
+
+	cfg := config.Config{
+		TargetPath:     "/var/run/secrets",
+		FilePermission: 0644,
+		Parameters: config.Parameters{
+			TrustDomain: "example.org",
+			PodInfo: config.PodInfo{
+				Namespace:          "default",
+				ServiceAccountName: "test-sa",
+				UID:                "123",
+				Name:               "test-pod",
+			},
+			Selectors: []config.Selector{
+				{Type: "k8s", Value: "ns:default"},
+				{Type: "k8s", Value: "sa:test-sa"},
+			},
+			Objects: []config.Object{
+				{
+					ObjectName:           "x509-svid",
+					Type:                 "x509-svid",
+					Paths:                []string{"/tls/cert.pem", "/tls/key.pem", "/tls/bundle.pem"},
+					IncludeFederated:     true,
+					MergeFederatedBundle: true,
+				},
+			},
+		},
+	}
+
+	flagsConfig := config.FlagsConfig{
+		SpireSocketPath: "/run/spire/socket",
+	}
+
+	ctx := context.Background()
+	resp, err := provider.HandleMountRequest(ctx, cfg, flagsConfig)
+
+	if err != nil {
+		t.Fatalf("HandleMountRequest failed: %v", err)
+	}
+
+	// Should have cert, key, and merged bundle
+	if len(resp.Files) != 3 {
+		t.Errorf("Expected 3 files, got %d", len(resp.Files))
+	}
+
+	// Find the bundle file and verify it contains both certificates
+	for _, file := range resp.Files {
+		if file.Path == "/tls/bundle.pem" {
+			bundleContent := string(file.Contents)
+			certCount := strings.Count(bundleContent, "BEGIN CERTIFICATE")
+			if certCount != 2 {
+				t.Errorf("Merged bundle should contain 2 certificates, got %d", certCount)
+			}
+		}
+	}
+}
+
 func generateTestCertificate(t *testing.T) (*x509.Certificate, *rsa.PrivateKey) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {

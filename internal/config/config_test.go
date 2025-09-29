@@ -50,10 +50,12 @@ func TestParse(t *testing.T) {
 					},
 					Objects: []Object{
 						{
-							ObjectName:     "x509-svid",
-							Type:           "x509-svid",
-							FilePermission: 0644,
-							Paths:          []string{"/cert.pem", "/key.pem", "/bundle.pem"},
+							ObjectName:           "x509-svid",
+							Type:                 "x509-svid",
+							FilePermission:       0644,
+							Paths:                []string{"/cert.pem", "/key.pem", "/bundle.pem"},
+							IncludeFederated:     false,
+							MergeFederatedBundle: false,
 						},
 					},
 					PodInfo: PodInfo{
@@ -99,10 +101,12 @@ func TestParse(t *testing.T) {
 					},
 					Objects: []Object{
 						{
-							ObjectName: "jwt-svid",
-							Type:       "jwt-svid",
-							Audience:   []string{"audience1", "audience2"},
-							Paths:      []string{"/token.jwt"},
+							ObjectName:           "jwt-svid",
+							Type:                 "jwt-svid",
+							Audience:             []string{"audience1", "audience2"},
+							Paths:                []string{"/token.jwt"},
+							IncludeFederated:     false,
+							MergeFederatedBundle: false,
 						},
 					},
 					PodInfo: PodInfo{
@@ -153,15 +157,19 @@ func TestParse(t *testing.T) {
 					},
 					Objects: []Object{
 						{
-							ObjectName: "x509-svid",
-							Type:       "x509-svid",
-							Paths:      []string{"/cert.pem", "/key.pem", "/bundle.pem"},
+							ObjectName:           "x509-svid",
+							Type:                 "x509-svid",
+							Paths:                []string{"/cert.pem", "/key.pem", "/bundle.pem"},
+							IncludeFederated:     false,
+							MergeFederatedBundle: false,
 						},
 						{
-							ObjectName: "jwt-svid",
-							Type:       "jwt-svid",
-							Audience:   []string{"audience1"},
-							Paths:      []string{"/token.jwt"},
+							ObjectName:           "jwt-svid",
+							Type:                 "jwt-svid",
+							Audience:             []string{"audience1"},
+							Paths:                []string{"/token.jwt"},
+							IncludeFederated:     false,
+							MergeFederatedBundle: false,
 						},
 					},
 					PodInfo: PodInfo{
@@ -386,6 +394,393 @@ func TestParse(t *testing.T) {
 			permissionStr: "not-a-number",
 			wantErr:       true,
 		},
+		{
+			name: "x509-svid with federated options enabled",
+			parametersStr: buildParametersJSON(map[string]string{
+				"useCase":                                "default",
+				"trustDomain":                            "example.org",
+				"csi.storage.k8s.io/pod.name":            "test-pod",
+				"csi.storage.k8s.io/pod.uid":             "123-456",
+				"csi.storage.k8s.io/pod.namespace":       "default",
+				"csi.storage.k8s.io/serviceAccount.name": "test-sa",
+				"objects": `
+- objectName: x509-svid
+  type: x509-svid
+  filePermission: 0644
+  paths:
+    - /cert.pem
+    - /key.pem
+    - /bundle.pem
+  includeFederated: true
+  mergeFederatedBundle: true`,
+			}),
+			targetPath:    "/var/run/secrets",
+			permissionStr: "420",
+			want: Config{
+				TargetPath:     "/var/run/secrets",
+				FilePermission: 0644,
+				Parameters: Parameters{
+					UseCase:     "default",
+					TrustDomain: "example.org",
+					Selectors: []Selector{
+						{Type: "k8s", Value: "ns:default"},
+						{Type: "k8s", Value: "sa:test-sa"},
+						{Type: "k8s", Value: "pod-uid:123-456"},
+					},
+					Objects: []Object{
+						{
+							ObjectName:           "x509-svid",
+							Type:                 "x509-svid",
+							FilePermission:       0644,
+							Paths:                []string{"/cert.pem", "/key.pem", "/bundle.pem"},
+							IncludeFederated:     true,
+							MergeFederatedBundle: true,
+						},
+					},
+					PodInfo: PodInfo{
+						Name:               "test-pod",
+						UID:                "123-456",
+						Namespace:          "default",
+						ServiceAccountName: "test-sa",
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "x509-svid with only includeFederated enabled",
+			parametersStr: buildParametersJSON(map[string]string{
+				"useCase":                                "default",
+				"trustDomain":                            "example.org",
+				"csi.storage.k8s.io/pod.name":            "test-pod",
+				"csi.storage.k8s.io/pod.uid":             "123-456",
+				"csi.storage.k8s.io/pod.namespace":       "default",
+				"csi.storage.k8s.io/serviceAccount.name": "test-sa",
+				"objects": `
+- objectName: x509-svid
+  type: x509-svid
+  paths:
+    - /cert.pem
+    - /key.pem
+    - /bundle.pem
+  includeFederated: true
+  mergeFederatedBundle: false`,
+			}),
+			targetPath:    "/var/run/secrets",
+			permissionStr: "420",
+			want: Config{
+				TargetPath:     "/var/run/secrets",
+				FilePermission: 0644,
+				Parameters: Parameters{
+					UseCase:     "default",
+					TrustDomain: "example.org",
+					Selectors: []Selector{
+						{Type: "k8s", Value: "ns:default"},
+						{Type: "k8s", Value: "sa:test-sa"},
+						{Type: "k8s", Value: "pod-uid:123-456"},
+					},
+					Objects: []Object{
+						{
+							ObjectName:           "x509-svid",
+							Type:                 "x509-svid",
+							Paths:                []string{"/cert.pem", "/key.pem", "/bundle.pem"},
+							IncludeFederated:     true,
+							MergeFederatedBundle: false,
+						},
+					},
+					PodInfo: PodInfo{
+						Name:               "test-pod",
+						UID:                "123-456",
+						Namespace:          "default",
+						ServiceAccountName: "test-sa",
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "x509-svid with federated options omitted (defaults to false)",
+			parametersStr: buildParametersJSON(map[string]string{
+				"useCase":                                "default",
+				"trustDomain":                            "example.org",
+				"csi.storage.k8s.io/pod.name":            "test-pod",
+				"csi.storage.k8s.io/pod.uid":             "123-456",
+				"csi.storage.k8s.io/pod.namespace":       "default",
+				"csi.storage.k8s.io/serviceAccount.name": "test-sa",
+				"objects": `
+- objectName: x509-svid
+  type: x509-svid
+  paths:
+    - /cert.pem
+    - /key.pem
+    - /bundle.pem`,
+			}),
+			targetPath:    "/var/run/secrets",
+			permissionStr: "420",
+			want: Config{
+				TargetPath:     "/var/run/secrets",
+				FilePermission: 0644,
+				Parameters: Parameters{
+					UseCase:     "default",
+					TrustDomain: "example.org",
+					Selectors: []Selector{
+						{Type: "k8s", Value: "ns:default"},
+						{Type: "k8s", Value: "sa:test-sa"},
+						{Type: "k8s", Value: "pod-uid:123-456"},
+					},
+					Objects: []Object{
+						{
+							ObjectName:           "x509-svid",
+							Type:                 "x509-svid",
+							Paths:                []string{"/cert.pem", "/key.pem", "/bundle.pem"},
+							IncludeFederated:     false, // Should default to false
+							MergeFederatedBundle: false, // Should default to false
+						},
+					},
+					PodInfo: PodInfo{
+						Name:               "test-pod",
+						UID:                "123-456",
+						Namespace:          "default",
+						ServiceAccountName: "test-sa",
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "x509-svid with only filePermission specified (federated defaults)",
+			parametersStr: buildParametersJSON(map[string]string{
+				"useCase":                                "default",
+				"trustDomain":                            "example.org",
+				"csi.storage.k8s.io/pod.name":            "test-pod",
+				"csi.storage.k8s.io/pod.uid":             "123-456",
+				"csi.storage.k8s.io/pod.namespace":       "default",
+				"csi.storage.k8s.io/serviceAccount.name": "test-sa",
+				"objects": `
+- objectName: x509-svid
+  type: x509-svid
+  filePermission: 0600
+  paths:
+    - /cert.pem
+    - /key.pem
+    - /bundle.pem`,
+			}),
+			targetPath:    "/var/run/secrets",
+			permissionStr: "420",
+			want: Config{
+				TargetPath:     "/var/run/secrets",
+				FilePermission: 0644,
+				Parameters: Parameters{
+					UseCase:     "default",
+					TrustDomain: "example.org",
+					Selectors: []Selector{
+						{Type: "k8s", Value: "ns:default"},
+						{Type: "k8s", Value: "sa:test-sa"},
+						{Type: "k8s", Value: "pod-uid:123-456"},
+					},
+					Objects: []Object{
+						{
+							ObjectName:           "x509-svid",
+							Type:                 "x509-svid",
+							FilePermission:       0600,
+							Paths:                []string{"/cert.pem", "/key.pem", "/bundle.pem"},
+							IncludeFederated:     false, // Should default to false
+							MergeFederatedBundle: false, // Should default to false
+						},
+					},
+					PodInfo: PodInfo{
+						Name:               "test-pod",
+						UID:                "123-456",
+						Namespace:          "default",
+						ServiceAccountName: "test-sa",
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "mergeFederatedBundle without includeFederated (valid but ineffective)",
+			parametersStr: buildParametersJSON(map[string]string{
+				"useCase":                                "default",
+				"trustDomain":                            "example.org",
+				"csi.storage.k8s.io/pod.name":            "test-pod",
+				"csi.storage.k8s.io/pod.uid":             "123-456",
+				"csi.storage.k8s.io/pod.namespace":       "default",
+				"csi.storage.k8s.io/serviceAccount.name": "test-sa",
+				"objects": `
+- objectName: x509-svid
+  type: x509-svid
+  paths:
+    - /cert.pem
+    - /key.pem
+    - /bundle.pem
+  includeFederated: false
+  mergeFederatedBundle: true`,
+			}),
+			targetPath:    "/var/run/secrets",
+			permissionStr: "420",
+			want: Config{
+				TargetPath:     "/var/run/secrets",
+				FilePermission: 0644,
+				Parameters: Parameters{
+					UseCase:     "default",
+					TrustDomain: "example.org",
+					Selectors: []Selector{
+						{Type: "k8s", Value: "ns:default"},
+						{Type: "k8s", Value: "sa:test-sa"},
+						{Type: "k8s", Value: "pod-uid:123-456"},
+					},
+					Objects: []Object{
+						{
+							ObjectName:           "x509-svid",
+							Type:                 "x509-svid",
+							Paths:                []string{"/cert.pem", "/key.pem", "/bundle.pem"},
+							IncludeFederated:     false,
+							MergeFederatedBundle: true,
+						},
+					},
+					PodInfo: PodInfo{
+						Name:               "test-pod",
+						UID:                "123-456",
+						Namespace:          "default",
+						ServiceAccountName: "test-sa",
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "multiple objects with different federated settings",
+			parametersStr: buildParametersJSON(map[string]string{
+				"useCase":                                "mixed",
+				"trustDomain":                            "example.org",
+				"csi.storage.k8s.io/pod.name":            "test-pod",
+				"csi.storage.k8s.io/pod.uid":             "123-456",
+				"csi.storage.k8s.io/pod.namespace":       "default",
+				"csi.storage.k8s.io/serviceAccount.name": "test-sa",
+				"objects": `
+- objectName: x509-federated
+  type: x509-svid
+  paths:
+    - /cert1.pem
+    - /key1.pem
+    - /bundle1.pem
+  includeFederated: true
+  mergeFederatedBundle: false
+- objectName: x509-regular
+  type: x509-svid
+  paths:
+    - /cert2.pem
+    - /key2.pem
+    - /bundle2.pem
+  includeFederated: false
+- objectName: x509-merged
+  type: x509-svid
+  paths:
+    - /cert3.pem
+    - /key3.pem
+    - /bundle3.pem
+  includeFederated: true
+  mergeFederatedBundle: true`,
+			}),
+			targetPath:    "/var/run/secrets",
+			permissionStr: "420",
+			want: Config{
+				TargetPath:     "/var/run/secrets",
+				FilePermission: 0644,
+				Parameters: Parameters{
+					UseCase:     "mixed",
+					TrustDomain: "example.org",
+					Selectors: []Selector{
+						{Type: "k8s", Value: "ns:default"},
+						{Type: "k8s", Value: "sa:test-sa"},
+						{Type: "k8s", Value: "pod-uid:123-456"},
+					},
+					Objects: []Object{
+						{
+							ObjectName:           "x509-federated",
+							Type:                 "x509-svid",
+							Paths:                []string{"/cert1.pem", "/key1.pem", "/bundle1.pem"},
+							IncludeFederated:     true,
+							MergeFederatedBundle: false,
+						},
+						{
+							ObjectName:           "x509-regular",
+							Type:                 "x509-svid",
+							Paths:                []string{"/cert2.pem", "/key2.pem", "/bundle2.pem"},
+							IncludeFederated:     false,
+							MergeFederatedBundle: false,
+						},
+						{
+							ObjectName:           "x509-merged",
+							Type:                 "x509-svid",
+							Paths:                []string{"/cert3.pem", "/key3.pem", "/bundle3.pem"},
+							IncludeFederated:     true,
+							MergeFederatedBundle: true,
+						},
+					},
+					PodInfo: PodInfo{
+						Name:               "test-pod",
+						UID:                "123-456",
+						Namespace:          "default",
+						ServiceAccountName: "test-sa",
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "jwt-svid with federated options (ignored for JWT)",
+			parametersStr: buildParametersJSON(map[string]string{
+				"useCase":                                "jwt",
+				"trustDomain":                            "example.org",
+				"csi.storage.k8s.io/pod.name":            "test-pod",
+				"csi.storage.k8s.io/pod.uid":             "123-456",
+				"csi.storage.k8s.io/pod.namespace":       "default",
+				"csi.storage.k8s.io/serviceAccount.name": "test-sa",
+				"objects": `
+- objectName: jwt-svid
+  type: jwt-svid
+  audience:
+    - audience1
+  paths:
+    - /token.jwt
+  includeFederated: true
+  mergeFederatedBundle: true`,
+			}),
+			targetPath:    "/var/run/secrets",
+			permissionStr: "420",
+			want: Config{
+				TargetPath:     "/var/run/secrets",
+				FilePermission: 0644,
+				Parameters: Parameters{
+					UseCase:     "jwt",
+					TrustDomain: "example.org",
+					Selectors: []Selector{
+						{Type: "k8s", Value: "ns:default"},
+						{Type: "k8s", Value: "sa:test-sa"},
+						{Type: "k8s", Value: "pod-uid:123-456"},
+					},
+					Objects: []Object{
+						{
+							ObjectName:           "jwt-svid",
+							Type:                 "jwt-svid",
+							Audience:             []string{"audience1"},
+							Paths:                []string{"/token.jwt"},
+							IncludeFederated:     true,
+							MergeFederatedBundle: true,
+						},
+					},
+					PodInfo: PodInfo{
+						Name:               "test-pod",
+						UID:                "123-456",
+						Namespace:          "default",
+						ServiceAccountName: "test-sa",
+					},
+				},
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -594,6 +989,52 @@ func TestConfigValidate(t *testing.T) {
 	}
 }
 
+func TestObjectFilePermission(t *testing.T) {
+	tests := []struct {
+		name     string
+		object   Object
+		expected os.FileMode
+	}{
+		{
+			name: "default permission",
+			object: Object{
+				ObjectName: "test",
+				Type:       "x509-svid",
+				Paths:      []string{"/test"},
+			},
+			expected: 0,
+		},
+		{
+			name: "custom permission 0600",
+			object: Object{
+				ObjectName:     "test",
+				Type:           "x509-svid",
+				FilePermission: 0600,
+				Paths:          []string{"/test"},
+			},
+			expected: 0600,
+		},
+		{
+			name: "custom permission 0644",
+			object: Object{
+				ObjectName:     "test",
+				Type:           "x509-svid",
+				FilePermission: 0644,
+				Paths:          []string{"/test"},
+			},
+			expected: 0644,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.object.FilePermission != tt.expected {
+				t.Errorf("FilePermission = %v, want %v", tt.object.FilePermission, tt.expected)
+			}
+		})
+	}
+}
+
 func buildParametersJSON(params map[string]string) string {
 	data, _ := json.Marshal(params)
 	return string(data)
@@ -661,6 +1102,12 @@ func compareParameters(t *testing.T, got, want Parameters) {
 			if got.Objects[i].FilePermission != want.Objects[i].FilePermission {
 				t.Errorf("Object[%d].FilePermission = %v, want %v", i, got.Objects[i].FilePermission, want.Objects[i].FilePermission)
 			}
+			if got.Objects[i].IncludeFederated != want.Objects[i].IncludeFederated {
+				t.Errorf("Object[%d].IncludeFederated = %v, want %v", i, got.Objects[i].IncludeFederated, want.Objects[i].IncludeFederated)
+			}
+			if got.Objects[i].MergeFederatedBundle != want.Objects[i].MergeFederatedBundle {
+				t.Errorf("Object[%d].MergeFederatedBundle = %v, want %v", i, got.Objects[i].MergeFederatedBundle, want.Objects[i].MergeFederatedBundle)
+			}
 			if len(got.Objects[i].Paths) != len(want.Objects[i].Paths) {
 				t.Errorf("Object[%d].Paths length = %v, want %v", i, len(got.Objects[i].Paths), len(want.Objects[i].Paths))
 			}
@@ -678,51 +1125,5 @@ func compareParameters(t *testing.T, got, want Parameters) {
 				}
 			}
 		}
-	}
-}
-
-func TestObjectFilePermission(t *testing.T) {
-	tests := []struct {
-		name     string
-		object   Object
-		expected os.FileMode
-	}{
-		{
-			name: "default permission",
-			object: Object{
-				ObjectName: "test",
-				Type:       "x509-svid",
-				Paths:      []string{"/test"},
-			},
-			expected: 0,
-		},
-		{
-			name: "custom permission 0600",
-			object: Object{
-				ObjectName:     "test",
-				Type:           "x509-svid",
-				FilePermission: 0600,
-				Paths:          []string{"/test"},
-			},
-			expected: 0600,
-		},
-		{
-			name: "custom permission 0644",
-			object: Object{
-				ObjectName:     "test",
-				Type:           "x509-svid",
-				FilePermission: 0644,
-				Paths:          []string{"/test"},
-			},
-			expected: 0644,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.object.FilePermission != tt.expected {
-				t.Errorf("FilePermission = %v, want %v", tt.object.FilePermission, tt.expected)
-			}
-		})
 	}
 }

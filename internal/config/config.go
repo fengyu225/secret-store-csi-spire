@@ -53,11 +53,13 @@ type RotationConfig struct {
 }
 
 type Object struct {
-	ObjectName     string      `yaml:"objectName,omitempty"`
-	Type           string      `yaml:"type,omitempty"`
-	Audience       []string    `yaml:"audience,omitempty"`
-	FilePermission os.FileMode `yaml:"filePermission,omitempty"`
-	Paths          []string    `yaml:"paths,omitempty"`
+	ObjectName           string      `yaml:"objectName,omitempty"`
+	Type                 string      `yaml:"type,omitempty"`
+	Audience             []string    `yaml:"audience,omitempty"`
+	FilePermission       os.FileMode `yaml:"filePermission,omitempty"`
+	Paths                []string    `yaml:"paths,omitempty"`
+	IncludeFederated     bool        `yaml:"includeFederated,omitempty"`
+	MergeFederatedBundle bool        `yaml:"mergeFederatedBundle,omitempty"`
 }
 
 type PodInfo struct {

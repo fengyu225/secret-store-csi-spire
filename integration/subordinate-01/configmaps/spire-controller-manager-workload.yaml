@@ -30,4 +30,4 @@ data:
     reconcile:
       clusterSPIFFEIDs: true
       clusterStaticEntries: false
-      clusterFederatedTrustDomains: false
+      clusterFederatedTrustDomains: true

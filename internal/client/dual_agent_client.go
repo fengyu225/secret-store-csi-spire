@@ -554,6 +554,43 @@ func (dac *DualAgentClient) GetTrustBundle() (*x509.CertPool, error) {
 	return nil, fmt.Errorf("failed to get trust bundle from any client")
 }
 
+func (dac *DualAgentClient) GetBundlesByDomain(ctx context.Context) (map[string][]*x509.Certificate, error) {
+	// Try both clients, return first success
+	type result struct {
+		bundles map[string][]*x509.Certificate
+		err     error
+		client  string
+	}
+
+	resultChan := make(chan result, 2)
+	fetchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	go func() {
+		bundles, err := dac.client1.GetBundlesByDomain(fetchCtx)
+		resultChan <- result{bundles: bundles, err: err, client: "agent1"}
+	}()
+
+	go func() {
+		bundles, err := dac.client2.GetBundlesByDomain(fetchCtx)
+		resultChan <- result{bundles: bundles, err: err, client: "agent2"}
+	}()
+
+	// Return first successful response
+	for i := 0; i < 2; i++ {
+		select {
+		case res := <-resultChan:
+			if res.err == nil && res.bundles != nil {
+				return res.bundles, nil
+			}
+		case <-fetchCtx.Done():
+			return nil, fmt.Errorf("timeout getting bundles by domain")
+		}
+	}
+
+	return nil, fmt.Errorf("failed to get bundles from any client")
+}
+
 // Status returns combined status of both clients
 func (dac *DualAgentClient) Status() (bool, string) {
 	connected1, msg1 := dac.client1.Status()

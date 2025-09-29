@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -198,16 +199,16 @@ func (p *Provider) HandleMountRequest(ctx context.Context, cfg config.Config, fl
 			filePermission = int32(object.FilePermission)
 		}
 
-		for _, path := range object.Paths {
+		for path, content := range contents {
 			files = append(files, &pb.File{
 				Path:     path,
 				Mode:     filePermission,
-				Contents: contents[path],
+				Contents: content,
 			})
 
 			p.logger.Info("file created",
 				"path", path,
-				"size", len(contents[path]),
+				"size", len(content),
 				"mode", fmt.Sprintf("%o", filePermission),
 				"object_name", object.ObjectName,
 				"type", object.Type,
@@ -376,52 +377,117 @@ func (p *Provider) fetchX509SVID(ctx context.Context, spireClient client.SpireCl
 		"key_type", fmt.Sprintf("%T", privateKey),
 	)
 
-	bundleStart := time.Now()
-	var bundlePEM strings.Builder
+	bundlePath = object.Paths[2]
 
-	certs, err := spireClient.GetCACertificates(ctx)
-	if err != nil {
-		p.logger.Error("failed to get CA certificates",
-			"error", err,
-			"object_name", object.ObjectName,
-			"duration_ms", time.Since(bundleStart).Milliseconds(),
-		)
-		return nil, fmt.Errorf("failed to get certificates from trust bundle: %w", err)
+	if object.IncludeFederated {
+		bundlesByDomain, err := spireClient.GetBundlesByDomain(ctx)
+		if err != nil {
+			p.logger.Warn("failed to get bundles by domain, falling back to regular CA certs", "error", err)
+			certs, err := spireClient.GetCACertificates(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get CA certificates: %w", err)
+			}
+			result[bundlePath] = p.encodeCertificates(certs)
+		} else {
+			domains := make([]string, 0, len(bundlesByDomain))
+			for domain := range bundlesByDomain {
+				domains = append(domains, domain)
+			}
+			p.logger.Debug("bundles available for domains", "domains", domains)
+
+			mainDomain := p.extractTrustDomain(spiffeID)
+			p.logger.Debug("extracted main trust domain", "main_domain", mainDomain, "spiffe_id", spiffeID)
+
+			if object.MergeFederatedBundle {
+				var allCerts []*x509.Certificate
+				for domain, domainCerts := range bundlesByDomain {
+					allCerts = append(allCerts, domainCerts...)
+					p.logger.Debug("merged domain", "domain", domain, "cert_count", len(domainCerts))
+				}
+				result[bundlePath] = p.encodeCertificates(allCerts)
+			} else {
+				baseDir := filepath.Dir(bundlePath)
+				foundMainDomain := false
+
+				for domain, domainCerts := range bundlesByDomain {
+					if len(domainCerts) == 0 {
+						p.logger.Warn("domain has no certificates", "domain", domain)
+						continue
+					}
+
+					var targetPath string
+					if domain == mainDomain ||
+						domain == "" ||
+						domain == "spiffe://"+mainDomain ||
+						strings.Contains(domain, mainDomain) {
+						targetPath = bundlePath
+						foundMainDomain = true
+						p.logger.Info("found main domain bundle",
+							"domain", domain,
+							"matched_against", mainDomain,
+							"cert_count", len(domainCerts))
+					} else {
+						normalizedDomain := strings.ReplaceAll(domain, ".", "_")
+						normalizedDomain = strings.ReplaceAll(normalizedDomain, ":", "_")
+						normalizedDomain = strings.ReplaceAll(normalizedDomain, "/", "_")
+						normalizedDomain = strings.TrimPrefix(normalizedDomain, "spiffe___")
+						targetPath = filepath.Join(baseDir, fmt.Sprintf("%s-bundle.pem", normalizedDomain))
+						p.logger.Info("found federated domain bundle",
+							"domain", domain,
+							"normalized", normalizedDomain,
+							"cert_count", len(domainCerts))
+					}
+
+					result[targetPath] = p.encodeCertificates(domainCerts)
+					p.logger.Info("created bundle file",
+						"domain", domain,
+						"path", targetPath,
+						"size", len(result[targetPath]))
+				}
+
+				// If main domain not found, use GetCACertificates as fallback
+				if !foundMainDomain {
+					p.logger.Warn("main domain not found in bundles map, using GetCACertificates",
+						"searched_for", mainDomain,
+						"available_domains", domains)
+
+					certs, err := spireClient.GetCACertificates(ctx)
+					if err != nil {
+						p.logger.Error("failed to get CA certificates", "error", err)
+						result[bundlePath] = []byte{}
+					} else {
+						result[bundlePath] = p.encodeCertificates(certs)
+						p.logger.Info("created main bundle from GetCACertificates",
+							"path", bundlePath,
+							"cert_count", len(certs),
+							"size", len(result[bundlePath]))
+					}
+				}
+			}
+		}
+	} else {
+		certs, err := spireClient.GetCACertificates(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get CA certificates: %w", err)
+		}
+		result[bundlePath] = p.encodeCertificates(certs)
 	}
-
-	bundleCertCount := 0
-	for i, cert := range certs {
-		bundlePEM.WriteString(string(pem.EncodeToMemory(&pem.Block{
-			Type:  "CERTIFICATE",
-			Bytes: cert.Raw,
-		})))
-		bundleCertCount++
-
-		p.logger.Trace("added CA certificate to bundle",
-			"index", i,
-			"subject", cert.Subject,
-			"issuer", cert.Issuer,
-			"not_after", cert.NotAfter,
-			"is_ca", cert.IsCA,
-		)
-	}
-
-	result[bundlePath] = []byte(bundlePEM.String())
-	p.logger.Debug("trust bundle created",
-		"path", bundlePath,
-		"cert_count", bundleCertCount,
-		"size", len(result[bundlePath]),
-		"duration_ms", time.Since(bundleStart).Milliseconds(),
-	)
 
 	totalDuration := time.Since(start)
+	totalSize := len(result[certPath]) + len(result[keyPath])
+	for path, content := range result {
+		if path != certPath && path != keyPath {
+			totalSize += len(content)
+		}
+	}
+
 	p.logger.Info("X509 SVID fetched successfully",
 		"object_name", object.ObjectName,
 		"spiffe_id", spiffeID,
 		"cert_count", certCount,
-		"bundle_cert_count", bundleCertCount,
 		"total_duration_ms", totalDuration.Milliseconds(),
-		"total_size", len(result[certPath])+len(result[keyPath])+len(result[bundlePath]),
+		"total_size", totalSize,
+		"file_count", len(result),
 	)
 
 	return result, nil
@@ -550,4 +616,26 @@ func (p *Provider) fetchJWTSVID(ctx context.Context, spireClient client.SpireCli
 	)
 
 	return result, nil
+}
+
+func (p *Provider) encodeCertificates(certs []*x509.Certificate) []byte {
+	var pemData strings.Builder
+	for _, cert := range certs {
+		pemData.WriteString(string(pem.EncodeToMemory(&pem.Block{
+			Type:  "CERTIFICATE",
+			Bytes: cert.Raw,
+		})))
+	}
+	return []byte(pemData.String())
+}
+
+func (p *Provider) extractTrustDomain(spiffeID string) string {
+	// spiffe://trust-domain/ns/namespace/sa/account
+	if strings.HasPrefix(spiffeID, "spiffe://") {
+		parts := strings.SplitN(spiffeID[9:], "/", 2)
+		if len(parts) > 0 {
+			return parts[0]
+		}
+	}
+	return ""
 }
